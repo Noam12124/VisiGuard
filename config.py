@@ -88,3 +88,5 @@ REDUCE_LR_FACTOR = 0.5
 # ─────────────────────────────────────────────
 
 CONFIDENCE_THRESHOLD = 0.60
+
+L2_LAMBDA = 5e-4
