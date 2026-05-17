@@ -23,7 +23,7 @@ def _build_backbone():
 
 
 # ─────────────────────────────────────────────
-# MODEL (EMBEDDING OUTPUT FOR ARCFACE)
+# EMBEDDING MODEL (for ArcFace)
 # ─────────────────────────────────────────────
 
 def build_model(num_classes: int):
@@ -32,12 +32,14 @@ def build_model(num_classes: int):
 
     inputs = tf.keras.Input(shape=config.IMAGE_SHAPE, name="image")
 
-    # IMPORTANT: normalize for EfficientNet
+    # EfficientNet expects 0–255 input
     x = tf.keras.applications.efficientnet.preprocess_input(inputs * 255.0)
 
+    # Feature extraction
     x = backbone(x, training=False)
     x = layers.GlobalAveragePooling2D()(x)
 
+    # Embedding layer
     x = layers.Dense(
         config.EMBEDDING_DIM,
         kernel_regularizer=regularizers.l2(config.L2_LAMBDA)
@@ -46,6 +48,7 @@ def build_model(num_classes: int):
     x = layers.BatchNormalization()(x)
     x = layers.ReLU()(x)
 
+    # L2-normalized embeddings
     embeddings = layers.Lambda(
         lambda t: tf.nn.l2_normalize(t, axis=1),
         name="embeddings"
@@ -55,13 +58,14 @@ def build_model(num_classes: int):
 
     logger.info("Embedding model built successfully")
 
+    # Attach backbone for fine-tuning
     model.backbone = backbone
 
     return model
 
 
 # ─────────────────────────────────────────────
-# UNFREEZE
+# UNFREEZE FOR PHASE 2
 # ─────────────────────────────────────────────
 
 def unfreeze_for_phase2(model):
@@ -73,12 +77,14 @@ def unfreeze_for_phase2(model):
 
     backbone.trainable = True
 
+    # Freeze all layers first
     for layer in backbone.layers:
         layer.trainable = False
 
     total = len(backbone.layers)
     start = max(0, total + config.UNFREEZE_FROM)
 
+    # Unfreeze last N layers (except BatchNorm)
     for layer in backbone.layers[start:]:
         if not isinstance(layer, layers.BatchNormalization):
             layer.trainable = True

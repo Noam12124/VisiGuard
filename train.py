@@ -3,6 +3,7 @@ import config
 import utils
 
 from model import build_model, unfreeze_for_phase2
+from arcface import ArcFace
 
 logger = utils.get_logger()
 
@@ -11,26 +12,37 @@ logger = utils.get_logger()
 # STEP FUNCTIONS
 # ─────────────────────────────────────────────
 
-def train_step(model, images, labels, optimizer):
+def train_step(model, arcface, images, labels, optimizer):
 
     with tf.GradientTape() as tape:
-        logits = model([images, labels], training=True)
 
+        # 1) Get embeddings from the model
+        embeddings = model(images, training=True)
+
+        # 2) ArcFace logits
+        logits = arcface([embeddings, labels])
+
+        # 3) Compute loss
         loss = tf.reduce_mean(
             tf.keras.losses.sparse_categorical_crossentropy(
                 labels, logits, from_logits=True
             )
         )
 
-    grads = tape.gradient(loss, model.trainable_variables)
-    optimizer.apply_gradients(zip(grads, model.trainable_variables))
+    # 4) Compute gradients for BOTH model + ArcFace
+    vars_all = model.trainable_variables + arcface.trainable_variables
+    grads = tape.gradient(loss, vars_all)
+
+    # 5) Apply gradients
+    optimizer.apply_gradients(zip(grads, vars_all))
 
     return loss
 
 
-def val_step(model, images, labels):
+def val_step(model, arcface, images, labels):
 
-    logits = model([images, labels], training=False)
+    embeddings = model(images, training=False)
+    logits = arcface([embeddings, labels])
 
     loss = tf.reduce_mean(
         tf.keras.losses.sparse_categorical_crossentropy(
@@ -53,7 +65,11 @@ def run_training(train_ds, val_ds, num_classes):
     logger.info("ARC FACE TRAINING - FINAL CLEAN VERSION")
     logger.info("=" * 60)
 
+    # Build embedding model
     model = build_model(num_classes)
+
+    # Build ArcFace head
+    arcface = ArcFace(num_classes)
 
     # ─────────────────────────────
     # PHASE 1
@@ -69,12 +85,14 @@ def run_training(train_ds, val_ds, num_classes):
         train_losses = []
         val_losses = []
 
+        # TRAIN
         for images, labels in train_ds:
-            loss = train_step(model, images, labels, optimizer)
+            loss = train_step(model, arcface, images, labels, optimizer)
             train_losses.append(float(loss))
 
+        # VALIDATION
         for images, labels in val_ds:
-            loss = val_step(model, images, labels)
+            loss = val_step(model, arcface, images, labels)
             val_losses.append(float(loss))
 
         train_loss = sum(train_losses) / len(train_losses)
@@ -86,13 +104,15 @@ def run_training(train_ds, val_ds, num_classes):
             f"| val_loss={val_loss:.4f}"
         )
 
+        # Save best model
         if val_loss < best_val:
             best_val = val_loss
             model.save(config.CHECKPOINT_PATH)
             logger.info("Saved best model")
 
+
     # ─────────────────────────────
-    # PHASE 2
+    # PHASE 2 — Fine‑tuning
     # ─────────────────────────────
     logger.info("=" * 60)
     logger.info("PHASE 2 - fine tuning")
@@ -108,12 +128,14 @@ def run_training(train_ds, val_ds, num_classes):
         train_losses = []
         val_losses = []
 
+        # TRAIN
         for images, labels in train_ds:
-            loss = train_step(model, images, labels, optimizer)
+            loss = train_step(model, arcface, images, labels, optimizer)
             train_losses.append(float(loss))
 
+        # VALIDATION
         for images, labels in val_ds:
-            loss = val_step(model, images, labels)
+            loss = val_step(model, arcface, images, labels)
             val_losses.append(float(loss))
 
         train_loss = sum(train_losses) / len(train_losses)
@@ -128,6 +150,7 @@ def run_training(train_ds, val_ds, num_classes):
         if val_loss < best_val:
             best_val = val_loss
             model.save(config.CHECKPOINT_PATH)
+            logger.info("Saved best fine‑tuned model")
 
     logger.info("=" * 60)
     logger.info("TRAINING COMPLETE")
