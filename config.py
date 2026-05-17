@@ -40,6 +40,7 @@ TEST_RATIO = 0.10
 # ─────────────────────────────────────────────
 
 IMAGE_SIZE = (160, 160)
+IMAGE_SHAPE = (*IMAGE_SIZE, 3)   # ← REQUIRED FIX
 
 # PK sampling (triplet loss training)
 P_ID = 16
