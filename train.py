@@ -1,4 +1,5 @@
 import tensorflow as tf
+from tqdm import tqdm
 import config
 import utils
 
@@ -85,13 +86,13 @@ def run_training(train_ds, val_ds, num_classes):
         train_losses = []
         val_losses = []
 
-        # TRAIN
-        for images, labels in train_ds:
+        # TRAIN WITH PROGRESS BAR
+        for images, labels in tqdm(train_ds, desc=f"Epoch {epoch+1} Training"):
             loss = train_step(model, arcface, images, labels, optimizer)
             train_losses.append(float(loss))
 
-        # VALIDATION
-        for images, labels in val_ds:
+        # VALIDATION WITH PROGRESS BAR
+        for images, labels in tqdm(val_ds, desc=f"Epoch {epoch+1} Validation"):
             loss = val_step(model, arcface, images, labels)
             val_losses.append(float(loss))
 
@@ -128,13 +129,13 @@ def run_training(train_ds, val_ds, num_classes):
         train_losses = []
         val_losses = []
 
-        # TRAIN
-        for images, labels in train_ds:
+        # TRAIN WITH PROGRESS BAR
+        for images, labels in tqdm(train_ds, desc=f"[FT] Epoch {epoch+1} Training"):
             loss = train_step(model, arcface, images, labels, optimizer)
             train_losses.append(float(loss))
 
-        # VALIDATION
-        for images, labels in val_ds:
+        # VALIDATION WITH PROGRESS BAR
+        for images, labels in tqdm(val_ds, desc=f"[FT] Epoch {epoch+1} Validation"):
             loss = val_step(model, arcface, images, labels)
             val_losses.append(float(loss))
 
