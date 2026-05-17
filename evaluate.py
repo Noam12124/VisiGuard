@@ -29,7 +29,7 @@ def evaluate(model, test_ds, y_test, le):
     logger.info(f"Test accuracy: {acc * 100:.2f}%")
 
     # ─────────────────────────────
-    # 2. PREDICTIONS (SAFE ORDER FIX)
+    # 2. PREDICTIONS
     # ─────────────────────────────
     logger.info("Generating predictions …")
 
