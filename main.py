@@ -15,24 +15,29 @@ logger = utils.get_logger()
 
 
 # ─────────────────────────────────────────────
-# GLOBAL STABILITY FIX (IMPORTANT FOR 85% TARGET)
+# REPRODUCIBILITY
 # ─────────────────────────────────────────────
+
 tf.random.set_seed(config.RANDOM_SEED)
 np.random.seed(config.RANDOM_SEED)
 
 
-def main(skip_training: bool = False) -> None:
+# ─────────────────────────────────────────────
+# MAIN PIPELINE
+# ─────────────────────────────────────────────
+
+def main(skip_training: bool = False):
 
     utils.ensure_dirs()
 
     logger.info("=" * 60)
-    logger.info("  VisiGuard – Face Recognition System")
+    logger.info("VisiGuard – ArcFace Face Recognition System")
     logger.info("=" * 60)
 
     # ─────────────────────────────
-    # STEP 1: DATA
+    # DATA
     # ─────────────────────────────
-    logger.info("\n[STEP 1] Building dataset pipeline …")
+    logger.info("\n[STEP 1] Loading dataset …")
 
     train_ds, val_ds, test_ds, y_test, le, num_classes, _ = load_all()
 
@@ -40,7 +45,7 @@ def main(skip_training: bool = False) -> None:
     logger.info(f"Test samples : {len(y_test)}")
 
     # ─────────────────────────────
-    # STEP 2: TRAINING
+    # TRAINING
     # ─────────────────────────────
     if not skip_training:
 
@@ -54,7 +59,7 @@ def main(skip_training: bool = False) -> None:
 
     else:
 
-        logger.info("\n[STEP 2] Loading checkpoint …")
+        logger.info("\n[STEP 2] Loading model …")
 
         if not os.path.exists(config.CHECKPOINT_PATH):
             raise FileNotFoundError(
@@ -64,16 +69,16 @@ def main(skip_training: bool = False) -> None:
         best_model = tf.keras.models.load_model(config.CHECKPOINT_PATH)
 
     # ─────────────────────────────
-    # STEP 3: EVALUATION
+    # EVALUATION
     # ─────────────────────────────
     logger.info("\n[STEP 3] Evaluating model …")
 
     metrics = evaluate(best_model, test_ds, y_test, le)
 
     # ─────────────────────────────
-    # STEP 4: INFERENCE DEMO (FIXED)
+    # INFERENCE DEMO
     # ─────────────────────────────
-    logger.info("\n[STEP 4] Inference demo (5 samples) …")
+    logger.info("\n[STEP 4] Inference demo …")
 
     _run_inference_demo(test_ds, le)
 
@@ -81,15 +86,15 @@ def main(skip_training: bool = False) -> None:
     # SUMMARY
     # ─────────────────────────────
     logger.info("\n" + "=" * 60)
-    logger.info("  PIPELINE COMPLETE")
-    logger.info(f"  Accuracy : {metrics['accuracy']*100:.2f}%")
-    logger.info(f"  F1 Score : {metrics['f1_macro']*100:.2f}%")
-    logger.info(f"  Model    : {config.CHECKPOINT_PATH}")
+    logger.info("PIPELINE COMPLETE")
+    logger.info(f"Accuracy : {metrics['accuracy']*100:.2f}%")
+    logger.info(f"F1 Score : {metrics['f1_macro']*100:.2f}%")
+    logger.info(f"Model    : {config.CHECKPOINT_PATH}")
     logger.info("=" * 60)
 
 
 # ─────────────────────────────────────────────
-# FIXED INFERENCE (IMPORTANT)
+# FIXED INFERENCE
 # ─────────────────────────────────────────────
 
 def _run_inference_demo(test_ds, le):
@@ -100,28 +105,21 @@ def _run_inference_demo(test_ds, le):
 
     predictor = VisiGuardPredictor()
 
-    # Take deterministic samples (NOT random batch order)
-    images = []
-    labels = []
+    # IMPORTANT FIX: avoid batch bias
+    test_unbatched = test_ds.unbatch()
 
-    for img_batch, lbl_batch in test_ds.take(1):
-        images = img_batch.numpy()
-        labels = lbl_batch.numpy()
-
-    images = images[:5]
-    labels = labels[:5]
+    samples = list(test_unbatched.take(5))
 
     logger.info("\n" + "─" * 55)
     logger.info("Inference Demo")
     logger.info("─" * 55)
 
-    for i in range(len(images)):
+    for i, (img, lbl) in enumerate(samples):
 
-        img = images[i]
-        true_idx = labels[i]
+        img = img.numpy()
+        true_idx = lbl.numpy()
 
-        # FIX: no BGR conversion (removes unnecessary noise source)
-        result = predictor.predict_frame(img.astype(np.uint8))
+        result = predictor.predict_frame(img)
 
         true_lbl = le.classes_[true_idx]
         pred_lbl = result["identity"]

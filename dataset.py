@@ -1,5 +1,9 @@
-import os
-import glob
+"""
+VisiGuard Dataset Pipeline (ArcFace Ready + Stable VGGFace2 Loader)
+====================================================================
+Clean, non-duplicated, production-safe version.
+"""
+
 import pathlib
 import numpy as np
 import tensorflow as tf
@@ -19,35 +23,22 @@ logger = utils.get_logger()
 def download_dataset() -> str:
     import kagglehub
 
-    logger.info(f"Downloading dataset: {config.KAGGLE_DATASET} …")
+    logger.info(f"Downloading dataset: {config.KAGGLE_DATASET}")
     root = kagglehub.dataset_download(config.KAGGLE_DATASET)
-    logger.info(f"Dataset root: {root}")
-
+    logger.info(f"Dataset downloaded: {root}")
     return root
 
 
 # ─────────────────────────────────────────────
-# 2. Find correct VGGFace2 root
+# 2. Find VGGFace2 root
 # ─────────────────────────────────────────────
 
 def _find_vggface2_root(path: str) -> str:
-    """
-    VGGFace2 structure:
-        root/
-            train/
-                n000001/
-                n000002/
-            test/
-    We prefer TRAIN split for training.
-    """
     path = pathlib.Path(path)
 
-    # Try direct VGGFace2 structure
-    train_path = path / "train"
-    if train_path.exists():
-        return str(train_path)
+    if (path / "train").exists():
+        return str(path / "train")
 
-    # fallback: search for folder containing identity folders
     for p in path.rglob("*"):
         if p.is_dir():
             subdirs = list(p.iterdir())
@@ -58,114 +49,104 @@ def _find_vggface2_root(path: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# 3. Scan dataset (FIXED FOR VGGFACE2)
+# 3. Scan dataset (clean + balanced)
 # ─────────────────────────────────────────────
 
-def scan_dataset(root: str) -> tuple[list[str], list[str]]:
-
+def scan_dataset(root: str):
     image_paths = []
     labels = []
 
-    extensions = {".jpg", ".jpeg", ".png"}
+    exts = {".jpg", ".jpeg", ".png"}
 
-    identity_dirs = [
-        d for d in pathlib.Path(root).iterdir()
-        if d.is_dir()
-    ]
+    identity_dirs = [d for d in pathlib.Path(root).iterdir() if d.is_dir()]
 
-    logger.info(f"Raw identities found: {len(identity_dirs)}")
-
-    # ── ADAPTIVE FILTER (IMPORTANT FOR 85% TARGET)
-    # VGGFace2 is large → do NOT over-filter
-    min_images = min(config.MIN_IMAGES_PER_CLASS, 5)
-
-    logger.info(f"Using MIN_IMAGES_PER_CLASS = {min_images}")
+    logger.info(f"Found identities: {len(identity_dirs)}")
 
     kept = 0
 
     for identity_dir in identity_dirs:
+
         imgs = [
             str(p) for p in identity_dir.rglob("*")
-            if p.suffix.lower() in extensions
+            if p.suffix.lower() in exts
         ]
 
-        if len(imgs) < min_images:
+        if len(imgs) < config.MIN_IMAGES_PER_CLASS:
             continue
+
+        if config.MAX_IMAGES_PER_CLASS:
+            imgs = imgs[:config.MAX_IMAGES_PER_CLASS]
 
         image_paths.extend(imgs)
         labels.extend([identity_dir.name] * len(imgs))
-        kept += 1
 
-        # safety cap (prevents RAM explosion)
-        if kept >= 5000:
+        kept += 1
+        if kept >= config.MAX_IDENTITIES:
             break
 
+    image_paths = np.array(image_paths)
+    labels = np.array(labels)
+
     logger.info(
-        f"Filtered → {len(set(labels))} identities | "
-        f"{len(image_paths)} images"
+        f"Filtered → images={len(image_paths)} | identities={len(set(labels))}"
     )
 
     if len(set(labels)) < 2:
-        raise ValueError("Too few classes after filtering — reduce MIN_IMAGES_PER_CLASS")
+        raise ValueError("Too few identities after filtering")
 
     return image_paths, labels
 
 
 # ─────────────────────────────────────────────
-# 4. Encode + split (IMPROVED BALANCE)
+# 4. Encode + split
 # ─────────────────────────────────────────────
 
-def encode_and_split(image_paths, labels):
+def encode_and_split(paths, labels):
 
     le = LabelEncoder()
     y = le.fit_transform(labels)
 
-    num_classes = len(le.classes_)
-    logger.info(f"Classes: {num_classes}")
+    X = np.array(paths)
 
-    X = np.array(image_paths)
-
-    # stratified split
     X_train, X_tmp, y_train, y_tmp = train_test_split(
         X, y,
-        test_size=0.3,
+        test_size=0.30,
         stratify=y,
-        random_state=config.RANDOM_SEED,
+        random_state=config.RANDOM_SEED
     )
 
     X_val, X_test, y_val, y_test = train_test_split(
         X_tmp, y_tmp,
         test_size=0.5,
         stratify=y_tmp,
-        random_state=config.RANDOM_SEED,
+        random_state=config.RANDOM_SEED
     )
 
     logger.info(
         f"Split → train={len(X_train)} val={len(X_val)} test={len(X_test)}"
     )
 
-    return X_train, X_val, X_test, y_train, y_val, y_test, le, num_classes
+    return X_train, X_val, X_test, y_train, y_val, y_test, le, len(le.classes_)
 
 
 # ─────────────────────────────────────────────
-# 5. tf.data pipeline (same but stable)
+# 5. tf.data pipeline (ArcFace-friendly)
 # ─────────────────────────────────────────────
 
-def _load_and_preprocess(path, label):
+def _load_image(path, label):
     img = tf.io.read_file(path)
     img = tf.image.decode_jpeg(img, channels=3)
     img = tf.image.resize(img, config.IMAGE_SIZE)
-    img = tf.cast(img, tf.float32)
+    img = tf.cast(img, tf.float32) / 255.0
     return img, label
 
 
-def _augment(image, label):
-    image = tf.image.random_flip_left_right(image)
-    image = tf.image.random_brightness(image, 0.2)
-    image = tf.image.random_contrast(image, 0.8, 1.2)
-
-    image = tf.clip_by_value(image, 0.0, 255.0)
-    return image, label
+def _augment(img, label):
+    img = tf.image.random_flip_left_right(img)
+    img = tf.image.random_brightness(img, 0.2)
+    img = tf.image.random_contrast(img, 0.8, 1.2)
+    img = tf.clip_by_value(img, 0.0, 1.0)
+    return img, label
 
 
 def build_dataset(paths, labels, augment=False, shuffle=False):
@@ -175,16 +156,18 @@ def build_dataset(paths, labels, augment=False, shuffle=False):
     )
 
     if shuffle:
-        ds = ds.shuffle(min(len(paths), 5000))
+        ds = ds.shuffle(
+            buffer_size=min(len(paths), 10000),
+            seed=config.RANDOM_SEED,
+            reshuffle_each_iteration=True
+        )
 
-    ds = ds.map(_load_and_preprocess, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.map(_load_image, num_parallel_calls=tf.data.AUTOTUNE)
 
     if augment:
         ds = ds.map(_augment, num_parallel_calls=tf.data.AUTOTUNE)
 
-    ds = ds.batch(config.BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
-
-    return ds
+    return ds.batch(config.BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
 
 # ─────────────────────────────────────────────
@@ -196,24 +179,20 @@ def load_all():
     utils.ensure_dirs()
 
     root = download_dataset()
-
-    # FIX: proper VGGFace2 root detection
     root = _find_vggface2_root(root)
 
-    logger.info(f"Using dataset root: {root}")
+    logger.info(f"Using root: {root}")
 
-    paths, lbls = scan_dataset(root)
-
-    utils.plot_class_distribution(lbls, title="VGGFace2 Distribution")
+    paths, labels = scan_dataset(root)
 
     X_train, X_val, X_test, y_train, y_val, y_test, le, num_classes = encode_and_split(
-        paths, lbls
+        paths, labels
     )
 
     utils.save_pickle(le, config.LABEL_ENCODER_PATH)
 
     train_ds = build_dataset(X_train, y_train, augment=True, shuffle=True)
-    val_ds   = build_dataset(X_val, y_val, augment=False)
-    test_ds  = build_dataset(X_test, y_test, augment=False)
+    val_ds   = build_dataset(X_val, y_val)
+    test_ds  = build_dataset(X_test, y_test)
 
-    return train_ds, val_ds, test_ds, y_test, le, num_classes, lbls
+    return train_ds, val_ds, test_ds, y_test, le, num_classes, labels

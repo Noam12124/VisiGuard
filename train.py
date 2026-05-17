@@ -1,11 +1,44 @@
-import os
 import tensorflow as tf
-
 import config
 import utils
-import model as model_module
+
+from model import build_model, unfreeze_for_phase2
 
 logger = utils.get_logger()
+
+
+# ─────────────────────────────────────────────
+# STEP FUNCTIONS
+# ─────────────────────────────────────────────
+
+def train_step(model, images, labels, optimizer):
+
+    with tf.GradientTape() as tape:
+        logits = model([images, labels], training=True)
+
+        loss = tf.reduce_mean(
+            tf.keras.losses.sparse_categorical_crossentropy(
+                labels, logits, from_logits=True
+            )
+        )
+
+    grads = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(grads, model.trainable_variables))
+
+    return loss
+
+
+def val_step(model, images, labels):
+
+    logits = model([images, labels], training=False)
+
+    loss = tf.reduce_mean(
+        tf.keras.losses.sparse_categorical_crossentropy(
+            labels, logits, from_logits=True
+        )
+    )
+
+    return loss
 
 
 # ─────────────────────────────────────────────
@@ -16,99 +49,88 @@ def run_training(train_ds, val_ds, num_classes):
 
     utils.ensure_dirs()
 
-    model = model_module.build_model(num_classes)
-    model_module.print_summary(model)
-
-    # ─────────────────────────────
-    # PHASE 1 (HEAD TRAINING)
-    # ─────────────────────────────
     logger.info("=" * 60)
-    logger.info("PHASE 1 — Frozen backbone training")
+    logger.info("ARC FACE TRAINING - FINAL CLEAN VERSION")
     logger.info("=" * 60)
 
-    history1 = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=config.PHASE1_EPOCHS,
-        callbacks=model_module.get_callbacks(phase=1),
-        verbose=1,
-    )
+    model = build_model(num_classes)
 
-    best_p1 = max(history1.history["val_accuracy"])
-    logger.info(f"Phase 1 best val accuracy: {best_p1:.4f}")
+    # ─────────────────────────────
+    # PHASE 1
+    # ─────────────────────────────
+    optimizer = tf.keras.optimizers.Adam(config.PHASE1_LR)
 
-    # Safety check (important for VGGFace2 stability)
-    if best_p1 < 0.30:
-        logger.warning(
-            "Phase 1 accuracy is very low. "
-            "Dataset may be too strict or imbalanced."
+    best_val = float("inf")
+
+    logger.info("PHASE 1 - training")
+
+    for epoch in range(config.PHASE1_EPOCHS):
+
+        train_losses = []
+        val_losses = []
+
+        for images, labels in train_ds:
+            loss = train_step(model, images, labels, optimizer)
+            train_losses.append(float(loss))
+
+        for images, labels in val_ds:
+            loss = val_step(model, images, labels)
+            val_losses.append(float(loss))
+
+        train_loss = sum(train_losses) / len(train_losses)
+        val_loss = sum(val_losses) / len(val_losses)
+
+        logger.info(
+            f"Epoch {epoch+1}/{config.PHASE1_EPOCHS} "
+            f"| train_loss={train_loss:.4f} "
+            f"| val_loss={val_loss:.4f}"
         )
 
+        if val_loss < best_val:
+            best_val = val_loss
+            model.save(config.CHECKPOINT_PATH)
+            logger.info("Saved best model")
+
     # ─────────────────────────────
-    # PHASE 2 (FINE TUNING)
+    # PHASE 2
     # ─────────────────────────────
     logger.info("=" * 60)
-    logger.info("PHASE 2 — Fine-tuning backbone")
+    logger.info("PHASE 2 - fine tuning")
     logger.info("=" * 60)
 
-    model = model_module.unfreeze_for_phase2(model)
+    model = unfreeze_for_phase2(model)
+    optimizer = tf.keras.optimizers.Adam(config.PHASE2_LR)
 
-    history2 = model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=config.PHASE2_EPOCHS,
-        callbacks=model_module.get_callbacks(phase=2),
-        verbose=1,
-    )
+    best_val = float("inf")
 
-    best_p2 = max(history2.history["val_accuracy"])
-    logger.info(f"Phase 2 best val accuracy: {best_p2:.4f}")
+    for epoch in range(config.PHASE2_EPOCHS):
 
-    # ─────────────────────────────
-    # LOAD BEST MODEL (IMPORTANT FIX)
-    # ─────────────────────────────
-    if os.path.exists(config.CHECKPOINT_PATH):
-        best_model = tf.keras.models.load_model(config.CHECKPOINT_PATH)
-        logger.info("Loaded best checkpoint model.")
-    else:
-        best_model = model
-        logger.warning("No checkpoint found, using last epoch model.")
+        train_losses = []
+        val_losses = []
 
-    # ─────────────────────────────
-    # FINAL SUMMARY
-    # ─────────────────────────────
-    overall_best = max(best_p1, best_p2)
+        for images, labels in train_ds:
+            loss = train_step(model, images, labels, optimizer)
+            train_losses.append(float(loss))
 
-    logger.info("=" * 60)
-    logger.info(f"OVERALL BEST VALIDATION ACC: {overall_best:.4f}")
-    logger.info("=" * 60)
+        for images, labels in val_ds:
+            loss = val_step(model, images, labels)
+            val_losses.append(float(loss))
 
-    if overall_best >= 0.85:
-        logger.info("✓ TARGET ACHIEVED (85%+)")
-    else:
-        logger.warning(
-            "Below 85% target. Recommended fixes:\n"
-            "- reduce MIN_IMAGES_PER_CLASS to 3–5\n"
-            "- increase PHASE2_EPOCHS\n"
-            "- increase UNFREEZE_FROM (more layers)\n"
-            "- ensure VGGFace2 train split is used only"
+        train_loss = sum(train_losses) / len(train_losses)
+        val_loss = sum(val_losses) / len(val_losses)
+
+        logger.info(
+            f"[FT] Epoch {epoch+1}/{config.PHASE2_EPOCHS} "
+            f"| train_loss={train_loss:.4f} "
+            f"| val_loss={val_loss:.4f}"
         )
 
-    # curves
-    utils.plot_training_curves(history1.history, history2.history)
+        if val_loss < best_val:
+            best_val = val_loss
+            model.save(config.CHECKPOINT_PATH)
 
-    return best_model, history1.history, history2.history
+    logger.info("=" * 60)
+    logger.info("TRAINING COMPLETE")
+    logger.info("=" * 60)
 
-
-# ─────────────────────────────
-# CLI
-# ─────────────────────────────
-
-if __name__ == "__main__":
-    from dataset import load_all
-
-    train_ds, val_ds, test_ds, y_test, le, num_classes, _ = load_all()
-
-    best_model, h1, h2 = run_training(train_ds, val_ds, num_classes)
-
-    logger.info("Training complete.")
+    return model, None, None

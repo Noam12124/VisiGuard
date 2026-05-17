@@ -13,54 +13,46 @@ import utils
 logger = utils.get_logger()
 
 
-# ─────────────────────────────────────────────
-# EVALUATION
-# ─────────────────────────────────────────────
-
 def evaluate(model, test_ds, y_test, le):
 
     utils.ensure_dirs()
-
     class_names = list(le.classes_)
 
-    # ─────────────────────────────
-    # 1. Loss + accuracy
-    # ─────────────────────────────
     logger.info("Evaluating model …")
+
+    # ─────────────────────────────
+    # 1. LOSS + ACCURACY
+    # ─────────────────────────────
     loss, acc = model.evaluate(test_ds, verbose=0)
 
     logger.info(f"Test loss: {loss:.4f}")
-    logger.info(f"Test accuracy: {acc*100:.2f}%")
+    logger.info(f"Test accuracy: {acc * 100:.2f}%")
 
     # ─────────────────────────────
-    # 2. Predictions (ORDER SAFE FIX)
+    # 2. PREDICTIONS (SAFE ORDER FIX)
     # ─────────────────────────────
     logger.info("Generating predictions …")
 
     y_pred_probs = model.predict(test_ds, verbose=0)
     y_pred = np.argmax(y_pred_probs, axis=1)
 
-    y_test = np.array(y_test)
+    y_true = np.array(y_test)
 
-    # FIX: strict alignment instead of silent truncation
-    min_len = min(len(y_pred), len(y_test))
-
-    if len(y_pred) != len(y_test):
-        logger.warning(
-            f"Length mismatch detected → "
-            f"pred={len(y_pred)} test={len(y_test)} → trimming to {min_len}"
-        )
-
-    y_pred = y_pred[:min_len]
-    y_test = y_test[:min_len]
+    # safety alignment check
+    min_len = min(len(y_pred), len(y_true))
+    if len(y_pred) != len(y_true):
+        logger.warning(f"Mismatch → pred={len(y_pred)} true={len(y_true)} → trimming")
+        y_pred = y_pred[:min_len]
+        y_true = y_true[:min_len]
 
     # ─────────────────────────────
-    # 3. Classification report
+    # 3. CLASSIFICATION REPORT
     # ─────────────────────────────
     report = classification_report(
-        y_test,
+        y_true,
         y_pred,
-        target_names=class_names[:len(np.unique(y_test))],
+        labels=np.arange(len(class_names)),
+        target_names=class_names,
         digits=4,
         zero_division=0,
     )
@@ -74,16 +66,16 @@ def evaluate(model, test_ds, y_test, le):
     logger.info(f"Saved report → {report_path}")
 
     # ─────────────────────────────
-    # 4. Confusion matrix
+    # 4. CONFUSION MATRIX
     # ─────────────────────────────
-    cm = confusion_matrix(y_test, y_pred)
+    cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)))
     utils.plot_confusion_matrix(cm, class_names)
 
     # ─────────────────────────────
-    # 5. Macro metrics
+    # 5. MACRO METRICS
     # ─────────────────────────────
     precision, recall, f1, _ = precision_recall_fscore_support(
-        y_test,
+        y_true,
         y_pred,
         average="macro",
         zero_division=0,
@@ -106,17 +98,10 @@ def evaluate(model, test_ds, y_test, le):
         f"────────────────────────"
     )
 
-    # ─────────────────────────────
-    # 6. Per-class accuracy
-    # ─────────────────────────────
-    _plot_per_class_accuracy(y_test, y_pred, class_names)
+    _plot_per_class_accuracy(y_true, y_pred, class_names)
 
     return metrics
 
-
-# ─────────────────────────────────────────────
-# PER CLASS PLOT (FIXED FOR VGGFACE2)
-# ─────────────────────────────────────────────
 
 def _plot_per_class_accuracy(y_true, y_pred, class_names):
 
@@ -128,7 +113,6 @@ def _plot_per_class_accuracy(y_true, y_pred, class_names):
 
     for i in range(len(class_names)):
         mask = y_true == i
-
         if np.sum(mask) == 0:
             per_class_acc.append(0.0)
         else:
@@ -139,7 +123,7 @@ def _plot_per_class_accuracy(y_true, y_pred, class_names):
     sorted_acc = [per_class_acc[i] for i in order]
     sorted_names = [class_names[i] for i in order]
 
-    fig_w = max(12, len(sorted_names) * 0.5)
+    fig_w = max(12, len(sorted_names) * 0.4)
 
     fig, ax = plt.subplots(figsize=(fig_w, 5), dpi=130)
 
@@ -170,22 +154,3 @@ def _plot_per_class_accuracy(y_true, y_pred, class_names):
     plt.close()
 
     logger.info(f"Saved per-class plot → {out}")
-
-
-# ─────────────────────────────────────────────
-# CLI
-# ─────────────────────────────────────────────
-
-if __name__ == "__main__":
-    from dataset import load_all
-
-    train_ds, val_ds, test_ds, y_test, le, num_classes, _ = load_all()
-
-    if not os.path.exists(config.CHECKPOINT_PATH):
-        raise FileNotFoundError("Train model first.")
-
-    model = tf.keras.models.load_model(config.CHECKPOINT_PATH)
-
-    evaluate(model, test_ds, y_test, le)
-
-    logger.info("Evaluation complete.")
