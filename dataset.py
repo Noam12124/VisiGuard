@@ -85,7 +85,7 @@ def encode_and_split(paths, labels):
 
 def _load_image(path, label):
     img = tf.io.read_file(path)
-    img = tf.image.decode_jpeg(img, channels=3, dct_method="FAST")
+    img = tf.image.decode_jpeg(img, channels=3, dct_method="INTEGER_FAST")
     img = tf.image.resize(img, config.IMAGE_SIZE, method="bilinear")
     img = tf.cast(img, tf.float32) / 255.0
     return img, label
@@ -113,7 +113,7 @@ def build_dataset(paths, labels, augment=False, shuffle=False):
     ds = ds.cache()  # HUGE SPEED BOOST
     ds = ds.batch(config.BATCH_SIZE)
     ds = ds.prefetch(tf.data.AUTOTUNE)
-
+    
     return ds
 
 
