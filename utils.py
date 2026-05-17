@@ -1,217 +1,226 @@
 """
-VisiGuard Utilities
-===================
-Shared helpers: directory creation, logging, plot saving.
-Keeps every other module clean and import-light.
+VisiGuard Dataset Pipeline (VGGFace2 Optimized)
+===============================================
+Drop-in replacement tuned for VGGFace2 structure.
+
+Key improvements:
+- Fully recursive dataset scan (VGGFace2 compatible)
+- Identity balancing (cap images per class)
+- Better filtering strategy (prevents dominance of huge identities)
+- Faster glob-based loading
 """
 
 import os
-import logging
-import pickle
+import glob
+import pathlib
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")          # headless rendering – safe for servers
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import tensorflow as tf
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
 
 import config
+import utils
+
+logger = utils.get_logger()
 
 
 # ─────────────────────────────────────────────
-# Logging
+# 1. Download dataset
 # ─────────────────────────────────────────────
 
-def get_logger(name: str = "visiguard") -> logging.Logger:
-    """Return a logger that writes to stdout with a clean format."""
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter("[%(asctime)s] %(levelname)s — %(message)s",
-                              datefmt="%H:%M:%S")
+def download_dataset() -> str:
+    import kagglehub
+
+    logger.info(f"Downloading dataset: {config.KAGGLE_DATASET}")
+    root = kagglehub.dataset_download(config.KAGGLE_DATASET)
+
+    root = _find_image_root(root)
+
+    logger.info(f"Dataset root resolved: {root}")
+    return root
+
+
+def _find_image_root(path: str) -> str:
+    """
+    Finds the actual identity root in VGGFace2 (handles train/test splits).
+    """
+    # VGGFace2 often has train/ folder
+    for dirpath, dirnames, filenames in os.walk(path):
+        if dirnames:
+            sample_dir = os.path.join(dirpath, dirnames[0])
+
+            imgs = glob.glob(os.path.join(sample_dir, "*.jpg"))
+            if len(imgs) > 5:
+                return dirpath
+
+    return path
+
+
+# ─────────────────────────────────────────────
+# 2. Scan dataset (VGGFace2 optimized)
+# ─────────────────────────────────────────────
+
+def scan_dataset(root: str):
+    """
+    Recursively scans VGGFace2 identity folders.
+    Adds optional per-class cap for balance.
+    """
+
+    image_paths = []
+    labels = []
+
+    extensions = {".jpg", ".jpeg", ".png"}
+
+    identity_dirs = [
+        d for d in pathlib.Path(root).rglob("*")
+        if d.is_dir() and len(list(d.glob("*"))) > 0
+    ]
+
+    logger.info(f"Raw folders found: {len(identity_dirs)}")
+
+    for identity_dir in identity_dirs:
+
+        imgs = [
+            str(p) for p in identity_dir.glob("*")
+            if p.suffix.lower() in extensions
+        ]
+
+        if len(imgs) < config.MIN_IMAGES_PER_CLASS:
+            continue
+
+        # ── IMPORTANT: balance huge VGGFace2 classes ──
+        if hasattr(config, "MAX_IMAGES_PER_CLASS") and config.MAX_IMAGES_PER_CLASS:
+            imgs = imgs[:config.MAX_IMAGES_PER_CLASS]
+
+        image_paths.extend(imgs)
+        labels.extend([identity_dir.name] * len(imgs))
+
+    logger.info(
+        f"After filtering → "
+        f"Classes: {len(set(labels))} | Images: {len(image_paths)}"
+    )
+
+    if len(set(labels)) < 2:
+        raise ValueError("Too few classes after filtering.")
+
+    return image_paths, labels
+
+
+# ─────────────────────────────────────────────
+# 3. Encode + split (FIXED for large datasets)
+# ─────────────────────────────────────────────
+
+def encode_and_split(image_paths, labels):
+
+    le = LabelEncoder()
+    y = le.fit_transform(labels)
+
+    num_classes = len(le.classes_)
+    logger.info(f"Total classes: {num_classes}")
+
+    X = np.array(image_paths)
+
+    # Stratified split (safe for large class count)
+    X_train, X_tmp, y_train, y_tmp = train_test_split(
+        X, y,
+        test_size=1 - config.TRAIN_RATIO,
+        stratify=y,
+        random_state=config.RANDOM_SEED
+    )
+
+    relative_test = config.TEST_RATIO / (config.VAL_RATIO + config.TEST_RATIO)
+
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_tmp, y_tmp,
+        test_size=relative_test,
+        stratify=y_tmp,
+        random_state=config.RANDOM_SEED
+    )
+
+    logger.info(
+        f"Split → train={len(X_train)}, val={len(X_val)}, test={len(X_test)}"
+    )
+
+    return X_train, X_val, X_test, y_train, y_val, y_test, le, num_classes
+
+
+# ─────────────────────────────────────────────
+# 4. tf.data pipeline (unchanged but stable)
+# ─────────────────────────────────────────────
+
+def _load_and_preprocess(path, label):
+    raw = tf.io.read_file(path)
+    img = tf.image.decode_image(raw, channels=3, expand_animations=False)
+    img = tf.image.resize(img, config.IMAGE_SIZE)
+    img = tf.cast(img, tf.float32)
+    return img, label
+
+
+def _augment(image, label):
+    if config.AUG_HFLIP:
+        image = tf.image.random_flip_left_right(image)
+
+    image = tf.image.random_brightness(
+        image, config.AUG_BRIGHTNESS_DELTA
+    )
+
+    image = tf.image.random_contrast(
+        image,
+        config.AUG_CONTRAST_LOWER,
+        config.AUG_CONTRAST_UPPER
+    )
+
+    h, w = config.IMAGE_SIZE
+    crop_h = int(h * (1 - config.AUG_ZOOM_RANGE))
+    crop_w = int(w * (1 - config.AUG_ZOOM_RANGE))
+
+    image = tf.image.random_crop(image, [crop_h, crop_w, 3])
+    image = tf.image.resize(image, config.IMAGE_SIZE)
+
+    return tf.clip_by_value(image, 0.0, 255.0), label
+
+
+def build_dataset(paths, labels, augment=False, shuffle=False):
+
+    ds = tf.data.Dataset.from_tensor_slices(
+        (paths.astype(str), labels.astype(np.int32))
+    )
+
+    if shuffle:
+        ds = ds.shuffle(
+            buffer_size=min(len(paths), 10000),
+            seed=config.RANDOM_SEED,
+            reshuffle_each_iteration=True
         )
-        logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    return logger
 
+    ds = ds.map(_load_and_preprocess, num_parallel_calls=tf.data.AUTOTUNE)
 
-logger = get_logger()
+    if augment:
+        ds = ds.map(_augment, num_parallel_calls=tf.data.AUTOTUNE)
 
-
-# ─────────────────────────────────────────────
-# Directory helpers
-# ─────────────────────────────────────────────
-
-def ensure_dirs() -> None:
-    """Create all required project directories if they don't exist."""
-    for path in [config.DATA_DIR, config.MODEL_DIR, config.RESULTS_DIR]:
-        os.makedirs(path, exist_ok=True)
-    logger.info("Project directories verified.")
+    return ds.batch(config.BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
 
 
 # ─────────────────────────────────────────────
-# Serialisation helpers
+# 5. Main loader
 # ─────────────────────────────────────────────
 
-def save_pickle(obj, path: str) -> None:
-    """Persist any Python object with pickle."""
-    with open(path, "wb") as f:
-        pickle.dump(obj, f)
-    logger.info(f"Saved → {path}")
+def load_all():
 
+    utils.ensure_dirs()
 
-def load_pickle(path: str):
-    """Load a pickled Python object."""
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    root = download_dataset()
+    paths, labels = scan_dataset(root)
 
+    utils.plot_class_distribution(labels, "VGGFace2 Distribution")
 
-# ─────────────────────────────────────────────
-# Training curve plots
-# ─────────────────────────────────────────────
+    X_train, X_val, X_test, y_train, y_val, y_test, le, num_classes = \
+        encode_and_split(paths, labels)
 
-def plot_training_curves(history_phase1: dict,
-                         history_phase2: dict | None = None) -> None:
-    """
-    Plot accuracy and loss curves for one or two training phases.
-    Saves the figure to RESULTS_DIR.
+    utils.save_pickle(le, config.LABEL_ENCODER_PATH)
 
-    Parameters
-    ----------
-    history_phase1 : dict   Keras History.history from phase 1
-    history_phase2 : dict   Keras History.history from phase 2 (optional)
-    """
-    # Merge phases if both provided
-    if history_phase2:
-        acc  = history_phase1["accuracy"]  + history_phase2["accuracy"]
-        val_acc = history_phase1["val_accuracy"] + history_phase2["val_accuracy"]
-        loss = history_phase1["loss"]      + history_phase2["loss"]
-        val_loss = history_phase1["val_loss"]    + history_phase2["val_loss"]
-        phase_boundary = len(history_phase1["accuracy"])
-    else:
-        acc      = history_phase1["accuracy"]
-        val_acc  = history_phase1["val_accuracy"]
-        loss     = history_phase1["loss"]
-        val_loss = history_phase1["val_loss"]
-        phase_boundary = None
+    train_ds = build_dataset(X_train, y_train, augment=True, shuffle=True)
+    val_ds   = build_dataset(X_val, y_val)
+    test_ds  = build_dataset(X_test, y_test)
 
-    epochs = range(1, len(acc) + 1)
-
-    fig, (ax1, ax2) = plt.subplots(1, 2,
-                                   figsize=config.CURVE_FIGSIZE,
-                                   dpi=150)
-
-    # ── Accuracy ──
-    ax1.plot(epochs, acc,     label="Train Acc",  color="#2196F3", linewidth=2)
-    ax1.plot(epochs, val_acc, label="Val Acc",    color="#FF5722",
-             linewidth=2, linestyle="--")
-    if phase_boundary:
-        ax1.axvline(phase_boundary, color="gray", linestyle=":", linewidth=1.2,
-                    label="Fine-tune start")
-    ax1.set_title("Accuracy", fontsize=13, fontweight="bold")
-    ax1.set_xlabel("Epoch"); ax1.set_ylabel("Accuracy")
-    ax1.legend(); ax1.grid(alpha=0.3)
-
-    # ── Loss ──
-    ax2.plot(epochs, loss,     label="Train Loss", color="#2196F3", linewidth=2)
-    ax2.plot(epochs, val_loss, label="Val Loss",   color="#FF5722",
-             linewidth=2, linestyle="--")
-    if phase_boundary:
-        ax2.axvline(phase_boundary, color="gray", linestyle=":", linewidth=1.2,
-                    label="Fine-tune start")
-    ax2.set_title("Loss", fontsize=13, fontweight="bold")
-    ax2.set_xlabel("Epoch"); ax2.set_ylabel("Loss")
-    ax2.legend(); ax2.grid(alpha=0.3)
-
-    plt.suptitle("VisiGuard – Training Curves", fontsize=15, fontweight="bold")
-    plt.tight_layout()
-
-    out = os.path.join(config.RESULTS_DIR, "training_curves.png")
-    plt.savefig(out, bbox_inches="tight")
-    plt.close(fig)
-    logger.info(f"Training curves saved → {out}")
-
-
-# ─────────────────────────────────────────────
-# Confusion matrix plot
-# ─────────────────────────────────────────────
-
-def plot_confusion_matrix(cm: np.ndarray,
-                          class_names: list[str]) -> None:
-    """
-    Render and save a normalised confusion matrix heatmap.
-
-    Parameters
-    ----------
-    cm          : raw (unnormalised) confusion matrix from sklearn
-    class_names : ordered list of label strings
-    """
-    # Normalise row-wise so each cell shows recall fraction
-    cm_norm = cm.astype(float) / (cm.sum(axis=1, keepdims=True) + 1e-9)
-
-    n = len(class_names)
-    fig_w = max(12, n * 0.6)
-    fig_h = max(10, n * 0.55)
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=130)
-
-    im = ax.imshow(cm_norm, interpolation="nearest", cmap="Blues",
-                   vmin=0, vmax=1)
-    plt.colorbar(im, ax=ax, fraction=0.04, pad=0.04)
-
-    ax.set_xticks(range(n))
-    ax.set_yticks(range(n))
-    # Shorten long names for readability
-    short = [n_.split("_")[0] for n_ in class_names]
-    ax.set_xticklabels(short, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(short, fontsize=8)
-
-    # Annotate cells only when n is small enough to be readable
-    if n <= 30:
-        thresh = cm_norm.max() / 2.0
-        for i in range(n):
-            for j in range(n):
-                val = cm_norm[i, j]
-                ax.text(j, i, f"{val:.2f}",
-                        ha="center", va="center", fontsize=6,
-                        color="white" if val > thresh else "black")
-
-    ax.set_title("Confusion Matrix (row-normalised)", fontsize=14,
-                 fontweight="bold")
-    ax.set_xlabel("Predicted Label"); ax.set_ylabel("True Label")
-    plt.tight_layout()
-
-    out = os.path.join(config.RESULTS_DIR, "confusion_matrix.png")
-    plt.savefig(out, bbox_inches="tight")
-    plt.close(fig)
-    logger.info(f"Confusion matrix saved → {out}")
-
-
-# ─────────────────────────────────────────────
-# Class distribution bar chart
-# ─────────────────────────────────────────────
-
-def plot_class_distribution(labels: list[str],
-                             title: str = "Class Distribution") -> None:
-    """Bar chart of sample counts per identity (top 40 shown)."""
-    unique, counts = np.unique(labels, return_counts=True)
-    order = np.argsort(-counts)          # sort descending
-    unique, counts = unique[order], counts[order]
-
-    # Cap at 40 for readability
-    if len(unique) > 40:
-        unique, counts = unique[:40], counts[:40]
-        title += " (top 40)"
-
-    fig, ax = plt.subplots(figsize=(14, 5), dpi=130)
-    ax.bar(range(len(unique)), counts, color="#2196F3", edgecolor="white")
-    ax.set_xticks(range(len(unique)))
-    ax.set_xticklabels([u.replace("_", " ") for u in unique],
-                       rotation=45, ha="right", fontsize=8)
-    ax.set_ylabel("Image count"); ax.set_title(title, fontweight="bold")
-    ax.grid(axis="y", alpha=0.3)
-    plt.tight_layout()
-
-    out = os.path.join(config.RESULTS_DIR, "class_distribution.png")
-    plt.savefig(out, bbox_inches="tight")
-    plt.close(fig)
-    logger.info(f"Class distribution saved → {out}")
+    return train_ds, val_ds, test_ds, y_test, le, num_classes, labels

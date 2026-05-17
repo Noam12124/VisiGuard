@@ -1,19 +1,3 @@
-"""
-VisiGuard – Main Entry Point
-=============================
-Runs the complete pipeline end-to-end:
-
-  1. Dataset  – download, scan, filter, encode, split, build tf.data pipelines
-  2. Training – two-phase transfer learning (warm-up → fine-tune)
-  3. Evaluation – accuracy, confusion matrix, per-class F1
-  4. Inference demo – predict on a random test sample
-
-Usage
------
-    python main.py              # full pipeline
-    python main.py --skip-train # load existing model, run eval only
-"""
-
 import argparse
 import os
 import numpy as np
@@ -21,115 +5,135 @@ import tensorflow as tf
 
 import config
 import utils
-from dataset  import load_all
-from train    import run_training
+
+from dataset import load_all
+from train import run_training
 from evaluate import evaluate
-from predict  import VisiGuardPredictor
+from predict import VisiGuardPredictor
 
 logger = utils.get_logger()
 
 
-def main(skip_training: bool = False) -> None:
-    """
-    Orchestrate the full VisiGuard pipeline.
+# ─────────────────────────────────────────────
+# GLOBAL STABILITY FIX (IMPORTANT FOR 85% TARGET)
+# ─────────────────────────────────────────────
+tf.random.set_seed(config.RANDOM_SEED)
+np.random.seed(config.RANDOM_SEED)
 
-    Parameters
-    ----------
-    skip_training : if True, skip training and load the existing checkpoint.
-    """
+
+def main(skip_training: bool = False) -> None:
+
     utils.ensure_dirs()
 
     logger.info("=" * 60)
     logger.info("  VisiGuard – Face Recognition System")
     logger.info("=" * 60)
 
-    # ── Step 1: Data ──────────────────────────────────────────────
+    # ─────────────────────────────
+    # STEP 1: DATA
+    # ─────────────────────────────
     logger.info("\n[STEP 1] Building dataset pipeline …")
-    (train_ds, val_ds, test_ds,
-     y_test, le, num_classes, all_labels) = load_all()
 
-    logger.info(f"  Classes       : {num_classes}")
-    logger.info(f"  Test samples  : {len(y_test)}")
+    train_ds, val_ds, test_ds, y_test, le, num_classes, _ = load_all()
 
-    # ── Step 2: Training ──────────────────────────────────────────
+    logger.info(f"Classes      : {num_classes}")
+    logger.info(f"Test samples : {len(y_test)}")
+
+    # ─────────────────────────────
+    # STEP 2: TRAINING
+    # ─────────────────────────────
     if not skip_training:
+
         logger.info("\n[STEP 2] Training model …")
-        best_model, h1, h2 = run_training(train_ds, val_ds, num_classes)
+
+        best_model, h1, h2 = run_training(
+            train_ds,
+            val_ds,
+            num_classes
+        )
+
     else:
-        logger.info("\n[STEP 2] Skipping training – loading checkpoint …")
+
+        logger.info("\n[STEP 2] Loading checkpoint …")
+
         if not os.path.exists(config.CHECKPOINT_PATH):
             raise FileNotFoundError(
-                f"No model at {config.CHECKPOINT_PATH}. "
-                "Run without --skip-train first."
+                f"No model found at {config.CHECKPOINT_PATH}"
             )
+
         best_model = tf.keras.models.load_model(config.CHECKPOINT_PATH)
 
-    # ── Step 3: Evaluation ────────────────────────────────────────
-    logger.info("\n[STEP 3] Evaluating on test set …")
+    # ─────────────────────────────
+    # STEP 3: EVALUATION
+    # ─────────────────────────────
+    logger.info("\n[STEP 3] Evaluating model …")
+
     metrics = evaluate(best_model, test_ds, y_test, le)
 
-    # ── Step 4: Inference demo ────────────────────────────────────
-    logger.info("\n[STEP 4] Running inference demo on 5 random test samples …")
-    _run_inference_demo(train_ds, test_ds, y_test, le)
+    # ─────────────────────────────
+    # STEP 4: INFERENCE DEMO (FIXED)
+    # ─────────────────────────────
+    logger.info("\n[STEP 4] Inference demo (5 samples) …")
 
-    # ── Summary ───────────────────────────────────────────────────
+    _run_inference_demo(test_ds, le)
+
+    # ─────────────────────────────
+    # SUMMARY
+    # ─────────────────────────────
     logger.info("\n" + "=" * 60)
     logger.info("  PIPELINE COMPLETE")
-    logger.info(f"  Test Accuracy  : {metrics['accuracy']*100:.2f}%")
-    logger.info(f"  Precision (M)  : {metrics['precision_macro']*100:.2f}%")
-    logger.info(f"  Recall (M)     : {metrics['recall_macro']*100:.2f}%")
-    logger.info(f"  F1 Score (M)   : {metrics['f1_macro']*100:.2f}%")
-    logger.info(f"  Model saved    : {config.CHECKPOINT_PATH}")
-    logger.info(f"  Plots saved    : {config.RESULTS_DIR}/")
+    logger.info(f"  Accuracy : {metrics['accuracy']*100:.2f}%")
+    logger.info(f"  F1 Score : {metrics['f1_macro']*100:.2f}%")
+    logger.info(f"  Model    : {config.CHECKPOINT_PATH}")
     logger.info("=" * 60)
 
 
 # ─────────────────────────────────────────────
-# Inference demo helper
+# FIXED INFERENCE (IMPORTANT)
 # ─────────────────────────────────────────────
 
-def _run_inference_demo(train_ds, test_ds, y_test, le) -> None:
-    """
-    Sample 5 images from the test set, run inference, and log results.
-    This verifies that the VisiGuardPredictor pipeline works end-to-end.
-    """
+def _run_inference_demo(test_ds, le):
+
     if not os.path.exists(config.CHECKPOINT_PATH):
-        logger.warning("No checkpoint found; skipping inference demo.")
+        logger.warning("No checkpoint found.")
         return
 
     predictor = VisiGuardPredictor()
 
-    # Collect a few raw images from the test pipeline
-    demo_images, demo_labels = [], []
-    for batch_imgs, batch_lbls in test_ds.take(2):
-        demo_images.append(batch_imgs.numpy())
-        demo_labels.append(batch_lbls.numpy())
+    # Take deterministic samples (NOT random batch order)
+    images = []
+    labels = []
 
-    demo_images = np.concatenate(demo_images, axis=0)[:5]
-    demo_labels = np.concatenate(demo_labels, axis=0)[:5]
+    for img_batch, lbl_batch in test_ds.take(1):
+        images = img_batch.numpy()
+        labels = lbl_batch.numpy()
 
-    logger.info(f"\n{'─'*55}")
-    logger.info("  Inference Demo (5 random test samples)")
-    logger.info(f"{'─'*55}")
+    images = images[:5]
+    labels = labels[:5]
 
-    for i, (img, true_idx) in enumerate(zip(demo_images, demo_labels)):
-        # Convert float32 [0,255] → uint8 BGR for the predictor helper
-        import cv2
-        rgb  = np.clip(img, 0, 255).astype(np.uint8)
-        bgr  = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    logger.info("\n" + "─" * 55)
+    logger.info("Inference Demo")
+    logger.info("─" * 55)
 
-        result   = predictor.predict_frame(bgr)
+    for i in range(len(images)):
+
+        img = images[i]
+        true_idx = labels[i]
+
+        # FIX: no BGR conversion (removes unnecessary noise source)
+        result = predictor.predict_frame(img.astype(np.uint8))
+
         true_lbl = le.classes_[true_idx]
         pred_lbl = result["identity"]
-        conf     = result["confidence"]
-        correct  = "✓" if pred_lbl == true_lbl else "✗"
+        conf = result["confidence"]
+
+        mark = "✓" if true_lbl == pred_lbl else "✗"
 
         logger.info(
-            f"  [{i+1}] True: {true_lbl:<25} | "
-            f"Pred: {pred_lbl:<25} ({conf*100:.1f}%)  {correct}"
+            f"[{i+1}] True: {true_lbl:<25} "
+            f"| Pred: {pred_lbl:<25} "
+            f"({conf*100:.1f}%) {mark}"
         )
-
-    logger.info(f"{'─'*55}")
 
 
 # ─────────────────────────────────────────────
@@ -137,13 +141,8 @@ def _run_inference_demo(train_ds, test_ds, y_test, le) -> None:
 # ─────────────────────────────────────────────
 
 def _parse_args():
-    parser = argparse.ArgumentParser(
-        description="VisiGuard – Face Recognition Pipeline"
-    )
-    parser.add_argument(
-        "--skip-train", action="store_true",
-        help="Skip training; load existing checkpoint and evaluate only."
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--skip-train", action="store_true")
     return parser.parse_args()
 
 
