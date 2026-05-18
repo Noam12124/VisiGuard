@@ -20,23 +20,53 @@ def evaluate(model, test_ds, y_test, le):
 
     logger.info("Evaluating model …")
 
-    # ─────────────────────────────
-    # 1. LOSS + ACCURACY
-    # ─────────────────────────────
-    loss, acc = model.evaluate(test_ds, verbose=0)
+    # ─────────────────────────────────────────────────────────────
+    # 1. MANUAL LOSS + ACCURACY + PREDICTIONS USING ARCFACE WEIGHTS
+    # ─────────────────────────────────────────────────────────────
+    w_path = os.path.join(config.MODEL_DIR, "arcface_weights.npy")
+    if not os.path.exists(w_path):
+        raise FileNotFoundError(f"ArcFace weights file not found at {w_path}. Cannot evaluate.")
+
+    # Load and normalize ArcFace weight matrix
+    W_matrix = np.load(w_path)
+    W_tensor = tf.convert_to_tensor(W_matrix, dtype=tf.float32)
+    W_norm = tf.nn.l2_normalize(W_tensor, axis=0)
+
+    total_loss = 0.0
+    total_samples = 0
+    all_preds = []
+    all_trues = []
+
+    logger.info("Generating predictions and calculating metrics over test set …")
+    
+    # Iterate through the test dataset batches manually to avoid compilation requirement
+    for images, labels in test_ds:
+        embeddings = model(images, training=False)
+        embeddings = tf.nn.l2_normalize(embeddings, axis=1)
+
+        # Compute cosine similarity and scale to get logits
+        cosine = tf.matmul(embeddings, W_norm)
+        logits = cosine * 64.0  # ArcFace Scale factor standard
+
+        # Compute Categorical Crossentropy Loss from logits
+        loss_batch = tf.keras.losses.sparse_categorical_crossentropy(
+            labels, logits, from_logits=True
+        )
+
+        total_loss += tf.reduce_sum(loss_batch).numpy()
+        total_samples += tf.shape(images)[0].numpy()
+
+        preds_batch = tf.argmax(logits, axis=1).numpy()
+        all_preds.extend(preds_batch)
+        all_trues.extend(labels.numpy())
+
+    loss = total_loss / total_samples
+    y_pred = np.array(all_preds)
+    y_true = np.array(all_trues)
+    acc = np.mean(y_pred == y_true)
 
     logger.info(f"Test loss: {loss:.4f}")
     logger.info(f"Test accuracy: {acc * 100:.2f}%")
-
-    # ─────────────────────────────
-    # 2. PREDICTIONS
-    # ─────────────────────────────
-    logger.info("Generating predictions …")
-
-    y_pred_probs = model.predict(test_ds, verbose=0)
-    y_pred = np.argmax(y_pred_probs, axis=1)
-
-    y_true = np.array(y_test)
 
     # safety alignment check
     min_len = min(len(y_pred), len(y_true))
@@ -46,51 +76,25 @@ def evaluate(model, test_ds, y_test, le):
         y_true = y_true[:min_len]
 
     # ─────────────────────────────
-    # 3. CLASSIFICATION REPORT
-    # ─────────────────────────────
-    report = classification_report(
-        y_true,
-        y_pred,
-        labels=np.arange(len(class_names)),
-        target_names=class_names,
-        digits=4,
-        zero_division=0,
-    )
-
-    logger.info("\n" + report)
-
-    report_path = os.path.join(config.RESULTS_DIR, "classification_report.txt")
-    with open(report_path, "w") as f:
-        f.write(report)
-
-    logger.info(f"Saved report → {report_path}")
-
-    # ─────────────────────────────
-    # 4. CONFUSION MATRIX
-    # ─────────────────────────────
-    cm = confusion_matrix(y_true, y_pred, labels=np.arange(len(class_names)))
-    utils.plot_confusion_matrix(cm, class_names)
-
-    # ─────────────────────────────
-    # 5. MACRO METRICS
+    # 3. METRICS REPORT
     # ─────────────────────────────
     precision, recall, f1, _ = precision_recall_fscore_support(
-        y_true,
-        y_pred,
-        average="macro",
-        zero_division=0,
+        y_true, y_pred, average="macro", zero_division=0
     )
 
     metrics = {
-        "accuracy": float(acc),
-        "loss": float(loss),
-        "precision_macro": float(precision),
-        "recall_macro": float(recall),
-        "f1_macro": float(f1),
+        "loss": loss,
+        "accuracy": acc,
+        "precision_macro": precision,
+        "recall_macro": recall,
+        "f1_macro": f1,
     }
 
     logger.info(
-        f"\n──────── RESULTS ────────\n"
+        f"\n────────────────────────\n"
+        f"Evaluation Summary\n"
+        f"────────────────────────\n"
+        f"Loss      : {loss:.4f}\n"
         f"Accuracy  : {acc*100:.2f}%\n"
         f"Precision : {precision*100:.2f}%\n"
         f"Recall    : {recall*100:.2f}%\n"
@@ -135,22 +139,16 @@ def _plot_per_class_accuracy(y_true, y_pred, class_names):
     ]
 
     ax.bar(range(len(sorted_acc)), sorted_acc, color=colors)
-    ax.axhline(0.85, linestyle="--", color="blue", label="85% target")
-
-    ax.set_ylim(0, 1.05)
-    ax.set_title("Per-Class Accuracy (VGGFace2)")
-    ax.set_ylabel("Accuracy")
-
+    ax.axhline(0.85, color="red", linestyle="--", alpha=0.6, label="Target (85%)")
     ax.set_xticks(range(len(sorted_names)))
-    ax.set_xticklabels(sorted_names, rotation=90, fontsize=6)
+    ax.set_xticklabels([n.replace("_", " ") for n in sorted_names], rotation=90, fontsize=6)
+    ax.set_title("Per-Class Test Accuracy (Sorted)", fontweight="bold")
+    ax.set_ylabel("Accuracy")
+    ax.set_ylim(0, 1.05)
+    ax.grid(axis="y", linestyle=":", alpha=0.5)
+    ax.legend(loc="lower right")
 
-    ax.legend()
-    ax.grid(axis="y", alpha=0.3)
-
-    plt.tight_layout()
-
-    out = os.path.join(config.RESULTS_DIR, "per_class_accuracy.png")
-    plt.savefig(out)
-    plt.close()
-
-    logger.info(f"Saved per-class plot → {out}")
+    out_path = os.path.join(config.RESULTS_DIR, "per_class_accuracy.png")
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"Per-class accuracy plot saved → {out_path}")
