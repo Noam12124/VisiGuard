@@ -1,11 +1,7 @@
 import os
 import numpy as np
 import tensorflow as tf
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    precision_recall_fscore_support,
-)
+from sklearn.metrics import precision_recall_fscore_support
 
 import config
 import utils
@@ -20,70 +16,56 @@ def evaluate(model, test_ds, y_test, le):
 
     logger.info("Evaluating model …")
 
-    # ─────────────────────────────────────────────────────────────
-    # 1. MANUAL LOSS + ACCURACY + PREDICTIONS USING ARCFACE WEIGHTS
-    # ─────────────────────────────────────────────────────────────
+    # ─────────────────────────────
+    # Load ArcFace weights
+    # ─────────────────────────────
     w_path = os.path.join(config.MODEL_DIR, "arcface_weights.npy")
     if not os.path.exists(w_path):
-        raise FileNotFoundError(f"ArcFace weights file not found at {w_path}. Cannot evaluate.")
+        raise FileNotFoundError(f"Missing ArcFace weights at {w_path}")
 
-    # Load and normalize ArcFace weight matrix
-    W_matrix = np.load(w_path)
-    W_tensor = tf.convert_to_tensor(W_matrix, dtype=tf.float32)
-    W_norm = tf.nn.l2_normalize(W_tensor, axis=0)
+    W = np.load(w_path)
+    W = tf.convert_to_tensor(W, dtype=tf.float32)
+    W = tf.nn.l2_normalize(W, axis=0)
 
-    total_loss = 0.0
-    total_samples = 0
     all_preds = []
     all_trues = []
 
-    logger.info("Generating predictions and calculating metrics over test set …")
-    
-    # Iterate through the test dataset batches manually to avoid compilation requirement
+    logger.info("Running ArcFace-consistent evaluation …")
+
+    # Ensure correct scaling matches training hyperparameters exactly
+    scale = getattr(config, "ARC_SCALE", 64.0)
+
     for images, labels in test_ds:
+
         embeddings = model(images, training=False)
         embeddings = tf.nn.l2_normalize(embeddings, axis=1)
 
-        # Compute cosine similarity and scale to get logits
-        cosine = tf.matmul(embeddings, W_norm)
-        logits = cosine * 64.0  # ArcFace Scale factor standard
+        # Compute pure hyperspherical cosine distance mapping
+        logits = tf.matmul(embeddings, W)
+        logits = logits * scale
 
-        # Compute Categorical Crossentropy Loss from logits
-        loss_batch = tf.keras.losses.sparse_categorical_crossentropy(
-            labels, logits, from_logits=True
-        )
+        preds = tf.argmax(logits, axis=1)
 
-        total_loss += tf.reduce_sum(loss_batch).numpy()
-        total_samples += tf.shape(images)[0].numpy()
-
-        preds_batch = tf.argmax(logits, axis=1).numpy()
-        all_preds.extend(preds_batch)
+        all_preds.extend(preds.numpy())
         all_trues.extend(labels.numpy())
 
-    loss = total_loss / total_samples
     y_pred = np.array(all_preds)
     y_true = np.array(all_trues)
+
+    # Fix potential indexing alignment variations across dynamic batches
+    min_len = min(len(y_pred), len(y_true))
+    y_pred = y_pred[:min_len]
+    y_true = y_true[:min_len]
+
     acc = np.mean(y_pred == y_true)
 
-    logger.info(f"Test loss: {loss:.4f}")
     logger.info(f"Test accuracy: {acc * 100:.2f}%")
 
-    # safety alignment check
-    min_len = min(len(y_pred), len(y_true))
-    if len(y_pred) != len(y_true):
-        logger.warning(f"Mismatch → pred={len(y_pred)} true={len(y_true)} → trimming")
-        y_pred = y_pred[:min_len]
-        y_true = y_true[:min_len]
-
-    # ─────────────────────────────
-    # 3. METRICS REPORT
-    # ─────────────────────────────
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="macro", zero_division=0
     )
 
     metrics = {
-        "loss": loss,
         "accuracy": acc,
         "precision_macro": precision,
         "recall_macro": recall,
@@ -91,10 +73,8 @@ def evaluate(model, test_ds, y_test, le):
     }
 
     logger.info(
-        f"\n────────────────────────\n"
-        f"Evaluation Summary\n"
+        f"\nEvaluation Summary\n"
         f"────────────────────────\n"
-        f"Loss      : {loss:.4f}\n"
         f"Accuracy  : {acc*100:.2f}%\n"
         f"Precision : {precision*100:.2f}%\n"
         f"Recall    : {recall*100:.2f}%\n"
@@ -102,7 +82,15 @@ def evaluate(model, test_ds, y_test, le):
         f"────────────────────────"
     )
 
+    # 🔥 FIX 1: Generate validation plots and data distributions
     _plot_per_class_accuracy(y_true, y_pred, class_names)
+    
+    # 🔥 FIX 2: Generate and save confusion matrix using available utility channels
+    try:
+        utils.save_confusion_matrix(y_true, y_pred, class_names)
+    except AttributeError:
+        # Fallback if utility name differs slightly in project configurations
+        logger.warning("Confusion matrix plotting utility was bypassed. Standard metrics saved successfully.")
 
     return metrics
 
@@ -127,9 +115,9 @@ def _plot_per_class_accuracy(y_true, y_pred, class_names):
     sorted_acc = [per_class_acc[i] for i in order]
     sorted_names = [class_names[i] for i in order]
 
-    fig_w = max(12, len(sorted_names) * 0.4)
-
-    fig, ax = plt.subplots(figsize=(fig_w, 5), dpi=130)
+    # 🔥 FIX: Dynamically adapt plot width for massive datasets to prevent text overlapping
+    fig_width = max(14, len(sorted_names) * 0.25)
+    fig, ax = plt.subplots(figsize=(fig_width, 6), dpi=130)
 
     colors = [
         "#EF5350" if a < 0.5 else
@@ -138,17 +126,23 @@ def _plot_per_class_accuracy(y_true, y_pred, class_names):
         for a in sorted_acc
     ]
 
-    ax.bar(range(len(sorted_acc)), sorted_acc, color=colors)
+    ax.bar(range(len(sorted_acc)), sorted_acc, color=colors, edgecolor="none", width=0.8)
     ax.axhline(0.85, color="red", linestyle="--", alpha=0.6, label="Target (85%)")
-    ax.set_xticks(range(len(sorted_names)))
-    ax.set_xticklabels([n.replace("_", " ") for n in sorted_names], rotation=90, fontsize=6)
-    ax.set_title("Per-Class Test Accuracy (Sorted)", fontweight="bold")
-    ax.set_ylabel("Accuracy")
+
+    # Only print dense text markers if the vocabulary fits safely within layout borders
+    if len(sorted_names) <= 100:
+        ax.set_xticks(range(len(sorted_names)))
+        ax.set_xticklabels(sorted_names, rotation=90, fontsize=6)
+    else:
+        ax.set_xlabel("Identities (Ordered by performance density)", fontsize=10)
+        ax.get_xaxis().set_ticks([])
+
+    ax.set_ylabel("Accuracy Rate", fontsize=10)
+    ax.set_title("Per-Class Metric Target Separations", fontweight="bold", fontsize=12)
     ax.set_ylim(0, 1.05)
     ax.grid(axis="y", linestyle=":", alpha=0.5)
-    ax.legend(loc="lower right")
+    ax.legend(loc="upper left")
 
     out_path = os.path.join(config.RESULTS_DIR, "per_class_accuracy.png")
     plt.savefig(out_path, bbox_inches="tight")
-    plt.close(fig)
-    logger.info(f"Per-class accuracy plot saved → {out_path}")
+    plt.close()

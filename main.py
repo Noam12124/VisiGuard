@@ -51,11 +51,17 @@ def main(skip_training: bool = False):
 
         logger.info("\n[STEP 2] Training model …")
 
-        best_model, h1, h2 = run_training(
+        # Returns updated history tracking dictionary configurations
+        _, h1, h2 = run_training(
             train_ds,
             val_ds,
             num_classes
         )
+        
+        # 🔥 FIX: Always reload the optimal saved on-disk weights explicitly.
+        # This prevents accidental compilation or model-state mismatch between custom training steps.
+        logger.info(f"Reloading optimal checkpoint from: {config.CHECKPOINT_PATH}")
+        best_model = tf.keras.models.load_model(config.CHECKPOINT_PATH)
 
     else:
 
@@ -63,7 +69,7 @@ def main(skip_training: bool = False):
 
         if not os.path.exists(config.CHECKPOINT_PATH):
             raise FileNotFoundError(
-                f"No model found at {config.CHECKPOINT_PATH}"
+                f"No model found at {config.CHECKPOINT_PATH}. Cannot skip training phase."
             )
 
         best_model = tf.keras.models.load_model(config.CHECKPOINT_PATH)
@@ -105,9 +111,8 @@ def _run_inference_demo(test_ds, le):
 
     predictor = VisiGuardPredictor()
 
-    # IMPORTANT FIX: avoid batch bias
+    # Avoid batch evaluation pipeline alignment bias
     test_unbatched = test_ds.unbatch()
-
     samples = list(test_unbatched.take(5))
 
     logger.info("\n" + "─" * 55)
@@ -116,10 +121,16 @@ def _run_inference_demo(test_ds, le):
 
     for i, (img, lbl) in enumerate(samples):
 
-        img = img.numpy()
+        img_np = img.numpy()
         true_idx = lbl.numpy()
 
-        result = predictor.predict_frame(img)
+        # 🔥 FIX: Convert raw RGB pipeline float32 images [0.0, 1.0] 
+        # back to standard uint8 arrays [0, 255] and rearrange to BGR color space 
+        # to ensure perfect alignment with OpenCV image parameters.
+        img_uint8 = (img_np * 255.0).astype(np.uint8)
+        img_bgr = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR)
+
+        result = predictor.predict_frame(img_bgr)
 
         true_lbl = le.classes_[true_idx]
         pred_lbl = result["identity"]
@@ -139,8 +150,9 @@ def _run_inference_demo(test_ds, le):
 # ─────────────────────────────────────────────
 
 def _parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--skip-train", action="store_true")
+    parser = argparse.ArgumentParser(description="VisiGuard – Main Control Orchestration Script")
+    parser.add_argument("--skip-train", action="store_true", 
+                        help="Skip the active training loops and run valuation checks directly using saved weights.")
     return parser.parse_args()
 
 

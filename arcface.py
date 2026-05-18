@@ -4,17 +4,17 @@ import math
 
 class ArcFace(tf.keras.layers.Layer):
     """
-    ArcFace layer implementing additive angular margin penalty.
-    Produces logits for softmax classification.
+    Stable ArcFace implementation (training-safe + numerically stable)
     """
 
-    def __init__(self, num_classes, margin=0.5, scale=64.0, **kwargs):
+    def __init__(self, num_classes, margin=0.3, scale=64.0, **kwargs):
         super().__init__(**kwargs)
+
         self.num_classes = num_classes
         self.margin = margin
         self.scale = scale
 
-        # Precompute constants for stability
+        # constants
         self.cos_m = math.cos(margin)
         self.sin_m = math.sin(margin)
         self.th = math.cos(math.pi - margin)
@@ -30,31 +30,33 @@ class ArcFace(tf.keras.layers.Layer):
             trainable=True,
         )
 
-    def call(self, inputs):
+    def call(self, inputs, training=True):
+
         embeddings, labels = inputs
 
-        # Normalize embeddings and weights
+        # normalize
         embeddings = tf.nn.l2_normalize(embeddings, axis=1)
         W = tf.nn.l2_normalize(self.W, axis=0)
 
-        # Cosine similarity
+        # cosine
         cosine = tf.matmul(embeddings, W)
         cosine = tf.clip_by_value(cosine, -1.0 + 1e-7, 1.0 - 1e-7)
 
-        # Compute sine
-        sine = tf.sqrt(1.0 - tf.square(cosine) + 1e-7)
+        # sine (stable)
+        sine = tf.sqrt(
+            tf.clip_by_value(1.0 - tf.square(cosine), 0.0, 1.0)
+        )
 
-        # Apply angular margin
+        # phi (angular margin)
         phi = cosine * self.cos_m - sine * self.sin_m
 
-        # Stability boundary
+        # boundary condition
         phi = tf.where(cosine > self.th, phi, cosine - self.mm)
 
-        # One-hot labels
+        # one-hot labels
         one_hot = tf.one_hot(labels, depth=self.num_classes)
 
-        # Combine margin logits with normal logits
-        logits = cosine * (1.0 - one_hot) + phi * one_hot
+        # combine
+        logits = (1.0 - one_hot) * cosine + one_hot * phi
 
-        # Scale logits
         return logits * self.scale

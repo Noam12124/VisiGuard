@@ -11,7 +11,6 @@ logger = utils.get_logger()
 # ─────────────────────────────────────────────
 
 def _build_backbone():
-
     backbone = tf.keras.applications.EfficientNetB0(
         include_top=False,
         weights="imagenet",
@@ -23,7 +22,7 @@ def _build_backbone():
 
 
 # ─────────────────────────────────────────────
-# EMBEDDING MODEL (for ArcFace)
+# EMBEDDING MODEL (ArcFace-ready)
 # ─────────────────────────────────────────────
 
 def build_model(num_classes: int):
@@ -32,23 +31,33 @@ def build_model(num_classes: int):
 
     inputs = tf.keras.Input(shape=config.IMAGE_SHAPE, name="image")
 
-    # EfficientNet expects 0–255 input
-    x = tf.keras.applications.efficientnet.preprocess_input(inputs * 255.0)
+    # EfficientNet expects 0–255 scale inputs explicitly processed
+    x = tf.keras.layers.Lambda(
+        lambda t: tf.keras.applications.efficientnet.preprocess_input(
+            t * 255.0
+        ),
+        name="preprocess"
+    )(inputs)
 
-    # Feature extraction
-    x = backbone(x, training=False)
+    # 🔥 CRITICAL BREAKTHROUGH FIX: Removed training=False hardcoding.
+    # Leaving this flag out allows Keras to automatically inject the execution loop context.
+    # It will safely keep BatchNorm frozen during Phase 1, and permit parameter updates during Phase 2.
+    x = backbone(x)
     x = layers.GlobalAveragePooling2D()(x)
 
-    # Embedding layer
+    # ─────────────────────────────────────────────
+    # EMBEDDING HEAD (Optimized for clean vector separation)
+    # ─────────────────────────────────────────────
     x = layers.Dense(
         config.EMBEDDING_DIM,
+        kernel_initializer="glorot_uniform",
         kernel_regularizer=regularizers.l2(config.L2_LAMBDA)
     )(x)
 
     x = layers.BatchNormalization()(x)
-    x = layers.ReLU()(x)
+    x = layers.PReLU()(x)
 
-    # L2-normalized embeddings
+    # L2 normalize embeddings (essential for hyperspherical margin separation)
     embeddings = layers.Lambda(
         lambda t: tf.nn.l2_normalize(t, axis=1),
         name="embeddings"
@@ -58,7 +67,7 @@ def build_model(num_classes: int):
 
     logger.info("Embedding model built successfully")
 
-    # Attach backbone for fine-tuning
+    # Attach backbone for tracking in phase unfreezing
     model.backbone = backbone
 
     return model
@@ -84,12 +93,12 @@ def unfreeze_for_phase2(model):
     total = len(backbone.layers)
     start = max(0, total + config.UNFREEZE_FROM)
 
-    # Unfreeze last N layers (except BatchNorm)
+    # Unfreeze the deep blocks (except global BatchNorm tracking parameters)
     for layer in backbone.layers[start:]:
         if not isinstance(layer, layers.BatchNormalization):
             layer.trainable = True
 
-    logger.info("Backbone partially unfrozen")
+    logger.info(f"Backbone partially unfrozen. Layers from index {start} to {total} are active.")
 
     return model
 

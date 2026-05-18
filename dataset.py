@@ -80,12 +80,13 @@ def encode_and_split(paths, labels):
 
 
 # ─────────────────────────────────────────────
-# SUPER FAST PIPELINE
+# OPTIMIZED PIPELINE (Handles 224x224 Resolution)
 # ─────────────────────────────────────────────
 
 def _load_image(path, label):
     img = tf.io.read_file(path)
     img = tf.image.decode_jpeg(img, channels=3, dct_method="INTEGER_FAST")
+    # Dynamically scales to configuration resolution targets (now natively 224x224)
     img = tf.image.resize(img, config.IMAGE_SIZE, method="bilinear")
     img = tf.cast(img, tf.float32) / 255.0
     return img, label
@@ -93,7 +94,9 @@ def _load_image(path, label):
 
 def _augment(img, label):
     img = tf.image.random_flip_left_right(img)
-    img = img + tf.random.normal(tf.shape(img), stddev=0.02)
+    # 🔥 FIX: Replaced unstructured Gaussian noise injection with moderate illumination adjustments.
+    # Unstructured pixel noise alters micro-textures that EfficientNet relies on for face classification.
+    img = tf.image.random_brightness(img, max_delta=0.1)
     img = tf.clip_by_value(img, 0.0, 1.0)
     return img, label
 
@@ -110,7 +113,8 @@ def build_dataset(paths, labels, augment=False, shuffle=False):
     if augment:
         ds = ds.map(_augment, num_parallel_calls=tf.data.AUTOTUNE, deterministic=False)
 
-    ds = ds.cache()  # HUGE SPEED BOOST
+    # 🔥 FIX: Call cache() before batching/prefetching, but after mapping transforms to ensure optimal pipeline execution
+    ds = ds.cache()  
     ds = ds.batch(config.BATCH_SIZE)
     ds = ds.prefetch(tf.data.AUTOTUNE)
     
