@@ -1,8 +1,10 @@
+import os
+import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
+
 import config
 import utils
-
 from model import build_model, unfreeze_for_phase2
 from arcface import ArcFace
 
@@ -14,9 +16,7 @@ logger = utils.get_logger()
 # ─────────────────────────────────────────────
 
 def train_step(model, arcface, images, labels, optimizer):
-
     with tf.GradientTape() as tape:
-
         # 1) Get embeddings from the model
         embeddings = model(images, training=True)
 
@@ -41,7 +41,6 @@ def train_step(model, arcface, images, labels, optimizer):
 
 
 def val_step(model, arcface, images, labels):
-
     embeddings = model(images, training=False)
     logits = arcface([embeddings, labels])
 
@@ -59,7 +58,6 @@ def val_step(model, arcface, images, labels):
 # ─────────────────────────────────────────────
 
 def run_training(train_ds, val_ds, num_classes):
-
     utils.ensure_dirs()
 
     logger.info("=" * 60)
@@ -73,16 +71,14 @@ def run_training(train_ds, val_ds, num_classes):
     arcface = ArcFace(num_classes)
 
     # ─────────────────────────────
-    # PHASE 1
+    # PHASE 1 - Frozen Backbone Training
     # ─────────────────────────────
     optimizer = tf.keras.optimizers.Adam(config.PHASE1_LR)
-
     best_val = float("inf")
 
     logger.info("PHASE 1 - training")
 
     for epoch in range(config.PHASE1_EPOCHS):
-
         train_losses = []
         val_losses = []
 
@@ -105,11 +101,18 @@ def run_training(train_ds, val_ds, num_classes):
             f"| val_loss={val_loss:.4f}"
         )
 
-        # Save best model
+        # Save best model if validation loss improves
         if val_loss < best_val:
             best_val = val_loss
+
+            # Save embedding model
             model.save(config.CHECKPOINT_PATH)
-            logger.info("Saved best model")
+
+            # Save ArcFace weights
+            weights_out = os.path.join(config.MODEL_DIR, "arcface_weights.npy")
+            np.save(weights_out, arcface.W.numpy())
+
+            logger.info("Saved best model + ArcFace weights")
 
 
     # ─────────────────────────────
@@ -122,10 +125,10 @@ def run_training(train_ds, val_ds, num_classes):
     model = unfreeze_for_phase2(model)
     optimizer = tf.keras.optimizers.Adam(config.PHASE2_LR)
 
+    # Reset best validation target for fine-tuning tracking
     best_val = float("inf")
 
     for epoch in range(config.PHASE2_EPOCHS):
-
         train_losses = []
         val_losses = []
 
@@ -148,10 +151,18 @@ def run_training(train_ds, val_ds, num_classes):
             f"| val_loss={val_loss:.4f}"
         )
 
+        # CHECKPOINT EVALUATION INSIDE THE LOOP
         if val_loss < best_val:
             best_val = val_loss
+
+            # Save embedding model
             model.save(config.CHECKPOINT_PATH)
-            logger.info("Saved best fine‑tuned model")
+
+            # Save ArcFace classifier weights explicitly using clean os.path joins
+            weights_out = os.path.join(config.MODEL_DIR, "arcface_weights.npy")
+            np.save(weights_out, arcface.W.numpy())
+
+            logger.info("Saved best fine-tuned model + ArcFace weights")
 
     logger.info("=" * 60)
     logger.info("TRAINING COMPLETE")
