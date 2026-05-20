@@ -358,15 +358,7 @@ def build_datasets(
     if data_dir is None:
         # Use aligned version if it exists, otherwise raw.
         aligned = config.DATA_DIR.rstrip("/\\") + "_aligned"
-        if os.path.exists(aligned):
-            # check if it actually contains images
-            has_data = any(
-                os.path.isdir(os.path.join(aligned, d)) and len(os.listdir(os.path.join(aligned, d))) > 0
-                for d in os.listdir(aligned)
-            )
-            data_dir = aligned if has_data else config.DATA_DIR
-        else:
-            data_dir = config.DATA_DIR
+        data_dir = aligned if os.path.exists(aligned) else config.DATA_DIR
 
     class_names, class_to_idx = build_class_catalogue(data_dir)
     save_class_catalogue(class_names)
