@@ -25,8 +25,8 @@ from pathlib import Path
 import config
 
 
-LFW_URL          = "http://vis-www.cs.umass.edu/lfw/lfw.tgz"
-LFW_FUNNELED_URL = "http://vis-www.cs.umass.edu/lfw/lfw-funneled.tgz"  # pre-aligned
+LFW_URL = "https://github.com/robertwgh/LFW-dataset/releases/download/v1.0/lfw.tgz"
+LFW_FUNNELED_URL = "https://github.com/robertwgh/LFW-dataset/releases/download/v1.0/lfw-funneled.tgz"
 LFW_ARCHIVE      = "/tmp/lfw.tgz"
 LFW_EXTRACT_DIR  = "/tmp/lfw_raw"
 
