@@ -101,6 +101,7 @@ def compute_verification_metrics(
     similarities = np.array(similarities, dtype=np.float32)
 
     # ── ROC curve ──────────────────────────────────────────────────────────
+    # FPR: False Positive Rate, TPR: True Positive Rate
     fpr, tpr, thresholds = roc_curve(labels, similarities, pos_label=1)
     roc_auc              = auc(fpr, tpr)
 
@@ -228,6 +229,13 @@ def threshold_sweep(
     return result
 
 
+# ── Helper function for Lambda layer ───────────────────────────────────────
+
+def _l2_norm(x):
+    """L2 normalization helper used by the embedding layer."""
+    return tf.nn.l2_normalize(x, axis=-1)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def parse_args():
@@ -252,10 +260,15 @@ def main():
         return
 
     print(f"[eval] Loading model from {args.model}…")
+    
+    # הוספנו את פונקציית הלמבדה לחפצים המותאמים אישית (custom_objects)
     model = tf.keras.models.load_model(
         args.model,
         compile=False,
-        custom_objects={"ArcFaceLayer": __import__("arcface").ArcFaceLayer},
+        custom_objects={
+            "ArcFaceLayer": __import__("arcface").ArcFaceLayer,
+            "_l2_norm": _l2_norm
+        },
     )
     print("[eval] Model loaded.")
 
