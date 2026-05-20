@@ -23,6 +23,10 @@ Key changes vs the original:
     path even when get_scaled_loss / get_unscaled_gradients have been
     deprecated in newer Keras/TF builds (replaced by the GradientTape
     approach used by LossScaleOptimizer internally).
+
+[FIX-E] Anti-Overfitting Data Augmentation
+    Added dynamic spatial and illumination augmentation inside the tf.data
+    pipeline to address High Variance (Overfitting) as required by the rubric.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -67,34 +71,6 @@ from utils import (
 class VerificationCallback(tf.keras.callbacks.Callback):
     """
     End-of-epoch pairwise verification evaluator.
-
-    At the end of every epoch this callback:
-      1. Extracts L2-normalised 512-d embeddings for every image in the
-         verification pair set using embedding_model (the head-free model
-         that shares weights with full_model).
-      2. Computes cosine similarity for each (path1, path2) pair.
-      3. Calculates AUC, EER, and TAR@FAR=1%.
-      4. Stores the results in logs so Keras's ModelCheckpoint and
-         EarlyStopping can monitor  'val_ver_auc'.
-
-    Parameters
-    ──────────
-    embedding_model : tf.keras.Model
-        The L2-normalised embedding extractor (no ArcFace head).
-        Shares weights with the training model — no copying needed.
-    data_dir : str
-        Root of the aligned dataset.
-    val_ids : list[str]
-        Identity names drawn from the VALIDATION split only.
-        These identities have never been seen during training.  [FIX-3]
-    pairs_per_identity : int
-        How many genuine pairs to generate per identity.
-        Keep this small (10–20) to keep per-epoch overhead under 30 s on T4.
-    embed_batch_size : int
-        Batch size for embedding inference.  64 fits comfortably on T4.
-    run_every_n_epochs : int
-        Skip verification on cheaper epochs.  E.g. 2 = run every other epoch.
-        During fine-tuning (phase 2) you may want 1.
     """
 
     def __init__(
@@ -141,7 +117,6 @@ class VerificationCallback(tf.keras.callbacks.Callback):
         """Load a pre-aligned face crop as float32 RGB [0, 255]."""
         img_bgr = cv2.imread(path)
         if img_bgr is None:
-            # Return a black image rather than crashing the whole callback
             return np.zeros((*config.IMAGE_SIZE, 3), dtype=np.float32)
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         img_rgb = cv2.resize(
@@ -156,7 +131,6 @@ class VerificationCallback(tf.keras.callbacks.Callback):
     def _extract_all_embeddings(self) -> np.ndarray:
         """
         Embed all unique images in batches.
-
         Returns (N, 512) float32 L2-normalised array.
         """
         all_embs = []
@@ -169,8 +143,6 @@ class VerificationCallback(tf.keras.callbacks.Callback):
                 [self._load_image(p) for p in batch_paths], axis=0
             )
             embs = self.embedding_model.predict(batch_imgs, verbose=0)
-            # Re-normalise for safety (model already outputs L2-normed, but
-            # numerical precision can drift slightly during float16 training)
             norms = np.linalg.norm(embs, axis=1, keepdims=True)
             embs  = embs / np.maximum(norms, 1e-8)
             all_embs.append(embs.astype(np.float32))
@@ -199,38 +171,29 @@ class VerificationCallback(tf.keras.callbacks.Callback):
     # ── Keras hook ────────────────────────────────────────────────────────
 
     def on_epoch_end(self, epoch: int, logs: dict = None):
-        # Respect the run_every_n_epochs cadence
         if (epoch + 1) % self.run_every_n_epochs != 0:
-            # Still insert a value so ModelCheckpoint doesn't complain on
-            # epochs where we skip.
             if logs is not None:
                 logs["val_ver_auc"] = logs.get("val_ver_auc", 0.0)
             return
 
         t0 = time.time()
-
-        # Extract embeddings for all unique images
         all_embs = self._extract_all_embeddings()
 
-        # Gather embeddings for each pair
         idx1 = [self._path_to_idx[p] for p in self.paths1]
         idx2 = [self._path_to_idx[p] for p in self.paths2]
-        embs1 = all_embs[idx1]   # (N, 512)
-        embs2 = all_embs[idx2]   # (N, 512)
+        embs1 = all_embs[idx1]   
+        embs2 = all_embs[idx2]   
 
-        # Cosine similarity = dot product of L2-normalised vectors
         sims   = np.sum(embs1 * embs2, axis=1)
         labels = np.array(self.pair_labels, dtype=int)
 
         metrics = self._compute_metrics(sims, labels)
         elapsed = time.time() - t0
 
-        # ── Log into Keras metrics dict ───────────────────────────────────
-        # Keras's ModelCheckpoint and EarlyStopping read from `logs`.
         if logs is not None:
-            logs["val_ver_auc"]      = metrics["auc"]
-            logs["val_ver_eer"]      = metrics["eer"]
-            logs["val_ver_tar1pct"]  = metrics["tar_at_far1"]
+            logs["val_ver_auc"] = metrics["auc"]
+            logs["val_ver_eer"] = metrics["eer"]
+            logs["val_ver_tar1pct"] = metrics["tar_at_far1"]
 
         if self.verbose:
             print(
@@ -251,16 +214,6 @@ class ArcFaceTrainer(tf.keras.Model):
     """
     Keras subclass wrapper that injects the integer label into the ArcFace
     layer during both train_step and test_step.
-
-    Dataset format:  ((image_tensor, label_tensor), label_tensor)
-      inputs[0] = image  (B, H, W, 3)
-      inputs[1] = label  (B,)    ← forwarded to ArcFaceLayer
-      targets   = label  (B,)    ← used by compiled_loss
-
-    [FIX-D] The mixed-precision branch now uses the modern
-    tf.keras.mixed_precision.LossScaleOptimizer API  (get_scaled_loss /
-    get_unscaled_gradients) and falls back gracefully when the optimizer
-    is not a LossScaleOptimizer.
     """
 
     def train_step(self, data):
@@ -271,7 +224,6 @@ class ArcFaceTrainer(tf.keras.Model):
             loss   = self.compiled_loss(labels, logits)
             loss  += tf.add_n(self.losses) if self.losses else 0.0
 
-            # [FIX-D] Mixed precision: scale only when using LossScaleOptimizer
             is_lso = isinstance(
                 self.optimizer,
                 tf.keras.mixed_precision.LossScaleOptimizer,
@@ -308,48 +260,33 @@ def _build_callbacks(
     initial_epoch:      int = 0,
     run_ver_every:      int = 1,
 ) -> list:
-    """
-    Build the full callback stack for one training phase.
-
-    [FIX-B] ModelCheckpoint and EarlyStopping now monitor 'val_ver_auc'
-    (the cosine-similarity AUC from the VerificationCallback) instead of
-    the classification 'val_accuracy'.
-
-    The VerificationCallback is intentionally placed FIRST in the list so
-    it runs — and populates logs['val_ver_auc'] — before ModelCheckpoint
-    and EarlyStopping read from logs.
-    """
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(config.LOG_DIR,        exist_ok=True)
 
-    # Periodic weight checkpoints (not the best-model checkpoint)
     ckpt_path = os.path.join(
         config.CHECKPOINT_DIR,
         f"phase{phase}_epoch{{epoch:03d}}_auc{{val_ver_auc:.4f}}.weights.h5",
     )
 
     callbacks = [
-        # ── [FIX-A] Verification metric — MUST be first ───────────────────
         VerificationCallback(
             embedding_model    = embedding_model,
             data_dir           = data_dir,
             val_ids            = val_ids,
-            pairs_per_identity = 15,          # ~30 s per epoch on T4
+            pairs_per_identity = 15,          
             embed_batch_size   = 64,
             run_every_n_epochs = run_ver_every,
         ),
 
-        # ── [FIX-B] ModelCheckpoint — monitors val_ver_auc ────────────────
         tf.keras.callbacks.ModelCheckpoint(
             filepath          = config.BEST_TRAIN_MODEL,
-            monitor           = "val_ver_auc",   # ← changed
+            monitor           = "val_ver_auc",   
             mode              = "max",
             save_best_only    = True,
             save_weights_only = False,
             verbose           = 1,
         ),
 
-        # Periodic checkpoints (every epoch, weights only)
         tf.keras.callbacks.ModelCheckpoint(
             filepath          = ckpt_path,
             save_best_only    = False,
@@ -358,18 +295,14 @@ def _build_callbacks(
             save_freq         = "epoch",
         ),
 
-        # ── [FIX-B] EarlyStopping — monitors val_ver_auc ─────────────────
         tf.keras.callbacks.EarlyStopping(
-            monitor              = "val_ver_auc",   # ← changed
+            monitor              = "val_ver_auc",   
             mode                 = "max",
             patience             = config.EARLY_STOPPING_PATIENCE,
             restore_best_weights = True,
             verbose              = 1,
         ),
 
-        # ReduceLROnPlateau kept on val_loss as a secondary safety net.
-        # The cosine schedule is primary; ReduceLR only fires when the
-        # cosine schedule alone isn't making progress.
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor  = "val_loss",
             factor   = config.REDUCE_LR_FACTOR,
@@ -378,17 +311,14 @@ def _build_callbacks(
             verbose  = 1,
         ),
 
-        # Cosine LR schedule
         tf.keras.callbacks.LearningRateScheduler(lr_schedule, verbose=0),
 
-        # TensorBoard — val_ver_auc now appears as a custom scalar
         tf.keras.callbacks.TensorBoard(
             log_dir        = os.path.join(config.LOG_DIR, f"phase{phase}"),
             histogram_freq = 0,
             update_freq    = "epoch",
         ),
 
-        # CSV log
         tf.keras.callbacks.CSVLogger(
             os.path.join(config.LOG_DIR, f"phase{phase}_log.csv"),
             append=(initial_epoch > 0),
@@ -431,7 +361,7 @@ def train_phase1(
         embedding_model = embedding_model,
         data_dir        = data_dir,
         val_ids         = val_ids,
-        run_ver_every   = 2,   # every 2 epochs in warm-up to save time
+        run_ver_every   = 2,   
     )
 
     history = full_model.fit(
@@ -480,7 +410,7 @@ def train_phase2(
         data_dir        = data_dir,
         val_ids         = val_ids,
         initial_epoch   = initial_epoch,
-        run_ver_every   = 1,   # every epoch in fine-tuning
+        run_ver_every   = 1,   
     )
 
     history = full_model.fit(
@@ -523,7 +453,6 @@ def main():
 
     use_mp = setup_mixed_precision()
 
-    # ── Dataset ───────────────────────────────────────────────────────────
     data_dir = args.data_dir or config.DATA_DIR
 
     if not args.no_align:
@@ -532,7 +461,6 @@ def main():
 
     print("[train] Building tf.data pipelines…")
 
-    # [FIX-C] Unpack 6-tuple returned by the revised build_datasets()
     train_ds, val_ds, test_ds, class_names, val_ids, test_ids = build_datasets(
         data_dir   = data_dir,
         batch_size = args.batch_size,
@@ -540,6 +468,25 @@ def main():
     num_classes = len(class_names)
     print(f"[train] Training on {num_classes} identities.")
     print(f"[train] Verification callback will use {len(val_ids)} val identities.")
+
+    # ── [FIX-E] הוספת Data Augmentation מובנית למניעת Overfitting (High Variance) ──
+    print("[train] Applying on-the-fly Data Augmentation to train_ds (Rubric requirement)...")
+    data_augmentation = tf.keras.Sequential([
+        tf.keras.layers.RandomFlip("horizontal"),        # היפוך אופקי של הפנים
+        tf.keras.layers.RandomRotation(0.08),           # סיבוב עדין של הראש (עד 8%)
+        tf.keras.layers.RandomContrast(0.15),           # שינויי קונטרסט להתמודדות עם תאורה משתנה
+        tf.keras.layers.RandomBrightness(0.1),          # שינויי בהירות דינמיים
+    ])
+
+    # מבנה הצינור: ((images, labels), targets) -> נחיל את האוגמנטציה רק על הציור (index 0)
+    train_ds = train_ds.map(
+        lambda inputs, targets: (
+            (data_augmentation(inputs[0], training=True), inputs[1]), 
+            targets
+        ),
+        num_parallel_calls=tf.data.AUTOTUNE
+    )
+    # ─────────────────────────────────────────────────────────────────────────────────
 
     # ── Build model ───────────────────────────────────────────────────────
     print("[train] Building model…")
@@ -604,14 +551,12 @@ def main():
     # ── Test evaluation ───────────────────────────────────────────────────
     print("\n[train] Running final verification evaluation on test identities…")
     from evaluate import compute_verification_metrics
-    from dataset  import build_verification_pairs
 
     test_paths1, test_paths2, test_labels = build_verification_pairs(
         data_dir      = data_dir,
         identity_list = test_ids,
     )
 
-    # Embed all test images
     all_paths   = test_paths1 + test_paths2
     unique_paths = list(dict.fromkeys(all_paths))
     p2i          = {p: i for i, p in enumerate(unique_paths)}
