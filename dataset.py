@@ -553,4 +553,3 @@ def build_verification_pairs(
         f"(from {len(identities)} identities)"
     )
     return paths1, paths2, pair_labels
-PYEOF
