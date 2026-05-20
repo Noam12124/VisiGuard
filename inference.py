@@ -104,7 +104,14 @@ def compare_two_images(img1_path: str, img2_path: str) -> dict:
 
     results = {}
     for label, path in [("img1", img1_path), ("img2", img2_path)]:
-        img_bgr = cv2.imread(path)
+        # קריאה חסינת רווחים וסוגריים בנתיב על ידי שימוש במערך בייטים גולמי
+        try:
+            with open(path, "rb") as f:
+                img_array = np.frombuffer(f.read(), dtype=np.uint8)
+            img_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        except Exception:
+            img_bgr = None
+
         if img_bgr is None:
             raise ValueError(f"Could not read image: {path}")
 
@@ -392,10 +399,19 @@ def main():
             print("Error: --img required for identify mode.")
             sys.exit(1)
         identifier = FaceIdentifier(gallery_dir=args.gallery, model_path=args.model)
-        img_bgr    = cv2.imread(args.img)
+        
+        # התאמת קריאה חסינת רווחים גם עבור מצב ה-identify ב-CLI
+        try:
+            with open(args.img, "rb") as f:
+                img_array = np.frombuffer(f.read(), dtype=np.uint8)
+            img_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        except Exception:
+            img_bgr = None
+
         if img_bgr is None:
             print(f"Error: could not read {args.img}")
             sys.exit(1)
+            
         out_path = args.output or os.path.join(
             config.OUTPUT_DIR,
             "identified_" + os.path.basename(args.img),
