@@ -10,6 +10,7 @@ import argparse
 import shutil
 from pathlib import Path
 
+import cv2  # <-- Added OpenCV to handle raw pixel encoding
 import config
 import tensorflow_datasets as tfds
 
@@ -34,10 +35,10 @@ def download_with_tfds():
     counts = {}
 
     for sample in tfds.as_numpy(ds):
-        image = sample["image"]
+        image = sample["image"]  # This is a NumPy array (H, W, 3)
         label = sample["label"]
 
-        # ✅ FIX: label is bytes like b'George_W_Bush'
+        # Convert label from bytes to string
         label = label.decode("utf-8")
 
         person_dir = os.path.join(LFW_EXTRACT_DIR, label)
@@ -46,8 +47,9 @@ def download_with_tfds():
         counts[label] = counts.get(label, 0) + 1
         img_path = os.path.join(person_dir, f"{counts[label]}.jpg")
 
-        with open(img_path, "wb") as f:
-            f.write(image)
+        # 🚨 FIX: Convert RGB (TFDS default) to BGR (OpenCV default) and encode as a proper JPEG
+        bgr_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(img_path, bgr_image)
 
     print("TFDS download + conversion done.")
 
