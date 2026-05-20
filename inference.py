@@ -30,6 +30,10 @@ from utils    import (
     build_gallery_embeddings,
 )
 
+# ── פונקציית העזר לנרמול (פותרת את שגיאת ה-Deserialization) ──────────────
+
+def _l2_norm(x):
+    return tf.math.l2_normalize(x, axis=1)
 
 # ── Embedding model singleton ──────────────────────────────────────────────
 
@@ -45,10 +49,17 @@ def get_embedding_model(path: str = config.BEST_EMBEDDING_MODEL):
                 "Please run train.py first."
             )
         print(f"[inference] Loading model from {path}…")
+        
+        # עדכון מילון ה-custom_objects עם פונקציית הנרמול
+        custom_objs = {
+            "ArcFaceLayer": __import__("arcface").ArcFaceLayer,
+            "_l2_norm": _l2_norm
+        }
+        
         _embedding_model = tf.keras.models.load_model(
             path,
             compile=False,
-            custom_objects={"ArcFaceLayer": __import__("arcface").ArcFaceLayer},
+            custom_objects=custom_objs,
         )
         print("[inference] Model ready.")
     return _embedding_model
@@ -64,7 +75,7 @@ def embed_face_crop(face_crop_bgr: np.ndarray, model) -> np.ndarray:
 
     Returns:
         embedding: (512,) float32 L2-normalised vector.
-    """
+        """
     # Convert BGR → RGB, scale to [0, 255] float32
     img_rgb = cv2.cvtColor(face_crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
     batch   = np.expand_dims(img_rgb, 0)           # (1, 112, 112, 3)
@@ -88,6 +99,9 @@ def compare_two_images(img1_path: str, img2_path: str) -> dict:
     model    = get_embedding_model()
     detector = get_detector()
 
+    # הגדרת סף ההחלטה האופטימלי מהאימון של VisiGuard
+    OPTIMAL_THRESHOLD = 0.1974
+
     results = {}
     for label, path in [("img1", img1_path), ("img2", img2_path)]:
         img_bgr = cv2.imread(path)
@@ -109,13 +123,13 @@ def compare_two_images(img1_path: str, img2_path: str) -> dict:
     emb2 = results["img2"]["embedding"]
     sim  = float(np.dot(emb1, emb2))   # cosine sim (already L2-normed)
 
-    same_person = sim >= config.SAME_PERSON_THRESHOLD
+    same_person = sim >= OPTIMAL_THRESHOLD
+    
     # Confidence: scale similarity to [0, 1] for the output range
-    # Positive side: how far above threshold (max 0.3 margin → 100%)
     if same_person:
-        conf = min(1.0, (sim - config.SAME_PERSON_THRESHOLD) / 0.30 + 0.5)
+        conf = min(1.0, (sim - OPTIMAL_THRESHOLD) / 0.30 + 0.5)
     else:
-        conf = min(1.0, (config.SAME_PERSON_THRESHOLD - sim) / 0.30 + 0.5)
+        conf = min(1.0, (OPTIMAL_THRESHOLD - sim) / 0.30 + 0.5)
     conf = max(0.0, conf)
 
     verdict = {
@@ -123,16 +137,18 @@ def compare_two_images(img1_path: str, img2_path: str) -> dict:
         "same_person":   same_person,
         "verdict":       "Same Person ✓" if same_person else "Different Person ✗",
         "confidence":    round(conf * 100, 1),
-        "threshold":     config.SAME_PERSON_THRESHOLD,
+        "threshold":     OPTIMAL_THRESHOLD,
     }
 
     # Print nice report
     sep = "─" * 52
     print(f"\n{sep}")
-    print(f"  Face Comparison Result")
+    print(f"   VisiGuard Face Comparison Result")
     print(sep)
-    for k, v in verdict.items():
-        print(f"  {k:<16}: {v}")
+    print(f"  Similarity (Cosine) : {verdict['similarity']:.4f}")
+    print(f"  Decision Threshold  : {verdict['threshold']:.4f}")
+    print(f"  Verdict             : {verdict['verdict']}")
+    print(f"  Confidence Score    : {verdict['confidence']}%")
     print(sep)
 
     return verdict
@@ -143,20 +159,12 @@ def compare_two_images(img1_path: str, img2_path: str) -> dict:
 class FaceIdentifier:
     """
     Identify faces in an image against a gallery of known identities.
-
-    Gallery layout:
-        data/gallery/
-            Alice_Smith/  (one or more images)
-            Bob_Jones/
-            ...
-
-    Gallery embeddings are computed once and cached in-memory.
     """
 
     def __init__(
         self,
         gallery_dir:   str   = config.GALLERY_DIR,
-        threshold:     float = config.SAME_PERSON_THRESHOLD,
+        threshold:     float = 0.1974,  # שימוש בסף האופטימלי כברירת מחדל
         model_path:    str   = config.BEST_EMBEDDING_MODEL,
     ):
         self.threshold = threshold
@@ -174,13 +182,6 @@ class FaceIdentifier:
               f"{len(self.gallery_embeddings)} embeddings.")
 
     def identify(self, image_bgr: np.ndarray) -> list[dict]:
-        """
-        Detect and identify all faces in an image.
-
-        Returns:
-            List of dicts, one per detected face:
-            {bbox, confidence, identity, similarity, detection}
-        """
         detections = self.detector.detect(image_bgr)
         if not detections:
             return []
@@ -193,7 +194,6 @@ class FaceIdentifier:
                 identity   = "Unknown"
                 best_sim   = 0.0
             else:
-                # Vectorised cosine similarity against all gallery embeddings
                 gallery_mat = np.array(self.gallery_embeddings)  # (M, 512)
                 sims        = gallery_mat @ emb                   # (M,)
                 best_idx    = int(np.argmax(sims))
@@ -218,11 +218,6 @@ class FaceIdentifier:
         image_bgr: np.ndarray,
         output_path: str = None,
     ) -> np.ndarray:
-        """
-        Identify all faces and draw annotated bounding boxes.
-
-        Returns annotated BGR image.
-        """
         results = self.identify(image_bgr)
         if not results:
             print("[identifier] No faces detected.")
@@ -245,7 +240,7 @@ class FaceIdentifier:
         # Print table
         sep = "─" * 60
         print(f"\n{sep}")
-        print(f"  Identification Results  ({len(results)} face(s))")
+        print(f"   Identification Results  ({len(results)} face(s))")
         print(sep)
         for i, r in enumerate(results):
             print(f"  Face {i+1}: {r['identity']:<25} sim={r['similarity']:.4f}  "
@@ -293,10 +288,6 @@ COLAB_CAPTURE_JS = """
 
 
 def run_webcam_colab(gallery_dir: str = config.GALLERY_DIR):
-    """
-    Colab webcam capture → identify loop.
-    Requires the notebook to run this in a code cell.
-    """
     try:
         from IPython.display import display, Javascript
         from google.colab.output import eval_js
@@ -327,7 +318,6 @@ def run_webcam_colab(gallery_dir: str = config.GALLERY_DIR):
 
         vis = identifier.identify_and_draw(frame)
 
-        # Display in Colab
         _, encoded = cv2.imencode(".jpg", vis)
         b64_img = __import__("base64").b64encode(encoded).decode("utf-8")
         display(__import__("IPython.display", fromlist=["HTML"]).HTML(
@@ -340,10 +330,6 @@ def run_webcam_colab(gallery_dir: str = config.GALLERY_DIR):
 
 
 def run_webcam_opencv(gallery_dir: str = config.GALLERY_DIR, camera_idx: int = 0):
-    """
-    Standard OpenCV webcam loop (non-Colab environments).
-    Press Q to quit.
-    """
     identifier = FaceIdentifier(gallery_dir=gallery_dir)
     cap        = cv2.VideoCapture(camera_idx)
 
@@ -361,7 +347,6 @@ def run_webcam_opencv(gallery_dir: str = config.GALLERY_DIR, camera_idx: int = 0
 
         vis = identifier.identify_and_draw(frame)
 
-        # FPS overlay
         curr_time = time.time()
         fps = 1.0 / max(curr_time - prev_time, 1e-5)
         prev_time = curr_time
