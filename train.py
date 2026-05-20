@@ -219,9 +219,10 @@ def _build_callbacks(
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(config.LOG_DIR,        exist_ok=True)
 
+    # FIXED: Extension updated from '.keras' to '.weights.h5' to conform with Keras 3 save_weights_only=True regulations
     ckpt_path = os.path.join(
         config.CHECKPOINT_DIR,
-        f"phase{phase}_epoch{{epoch:03d}}_val{{val_accuracy:.4f}}.keras"
+        f"phase{phase}_epoch{{epoch:03d}}_val{{val_accuracy:.4f}}.weights.h5"
     )
 
     callbacks = [
