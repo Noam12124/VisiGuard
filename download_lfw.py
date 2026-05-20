@@ -34,7 +34,7 @@ def download_with_tfds():
     counts = {}
 
     for image, label in tfds.as_numpy(ds):
-        label = str(int(label))
+        label = str(int(label.item()))
         person_dir = os.path.join(LFW_EXTRACT_DIR, label)
         os.makedirs(person_dir, exist_ok=True)
 
