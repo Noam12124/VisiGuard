@@ -27,27 +27,29 @@ def download_with_tfds():
     """
     print("Downloading LFW via TensorFlow Datasets...")
 
-    ds = tfds.load("lfw", split="train", as_supervised=True)
+    ds = tfds.load("lfw", split="train", as_supervised=False)
 
     os.makedirs(LFW_EXTRACT_DIR, exist_ok=True)
 
     counts = {}
 
-    for image, label in tfds.as_numpy(ds):
-        label = str(label)
+    for sample in tfds.as_numpy(ds):
+        image = sample["image"]
+        label = sample["label"]
+
+        # convert label safely to string
+        label = str(int(label))
 
         person_dir = os.path.join(LFW_EXTRACT_DIR, label)
         os.makedirs(person_dir, exist_ok=True)
 
         counts[label] = counts.get(label, 0) + 1
-
         img_path = os.path.join(person_dir, f"{counts[label]}.jpg")
 
         with open(img_path, "wb") as f:
             f.write(image)
 
     print("TFDS download + conversion done.")
-
 
 def extract_and_organise(
     archive_path: str,
