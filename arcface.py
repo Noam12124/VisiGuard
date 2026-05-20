@@ -76,37 +76,50 @@ class ArcFaceLayer(Layer):
         Returns:
             logits: (batch, num_classes)
         """
+        # Determine current compute precision (e.g., float16 under mixed precision)
+        dtype = embeddings.dtype
+
         # L2-normalise both embeddings and weights → cos(θ) = emb · W_norm
         emb_norm = tf.nn.l2_normalize(embeddings, axis=1)
-        W_norm   = tf.nn.l2_normalize(self.W,      axis=0)
+        W_norm   = tf.nn.l2_normalize(tf.cast(self.W, dtype), axis=0)
 
         # cos(θ)  shape: (batch, num_classes)
         cos_theta = tf.matmul(emb_norm, W_norm)
-        cos_theta = tf.clip_by_value(cos_theta, -1.0 + 1e-7, 1.0 - 1e-7)
+        
+        # Cast scalar thresholds to match compute precision
+        one_cast = tf.cast(1.0, dtype)
+        eps_cast = tf.cast(1e-7, dtype)
+        cos_theta = tf.clip_by_value(cos_theta, -one_cast + eps_cast, one_cast - eps_cast)
 
         if not training or labels is None:
-            return self.scale * cos_theta
+            return tf.cast(self.scale, dtype) * cos_theta
 
         # sin(θ) via Pythagorean identity  (numerically stable, no arccos needed)
-        sin_theta = tf.sqrt(tf.maximum(1.0 - tf.square(cos_theta), 1e-7))
+        sin_theta = tf.sqrt(tf.maximum(one_cast - tf.square(cos_theta), eps_cast))
+
+        # Dynamically cast precomputed weights to match precision
+        cos_m_cast = tf.cast(self.cos_m, dtype)
+        sin_m_cast = tf.cast(self.sin_m, dtype)
+        threshold_cast = tf.cast(self.threshold, dtype)
+        mm_cast = tf.cast(self.mm, dtype)
 
         # cos(θ + m) = cos θ · cos m − sin θ · sin m
-        cos_theta_m = cos_theta * self.cos_m - sin_theta * self.sin_m
+        cos_theta_m = cos_theta * cos_m_cast - sin_theta * sin_m_cast
 
         # Fall-back for θ + m > π (prevents going "past" the antipodal point)
         cos_theta_m = tf.where(
-            cos_theta > self.threshold,
+            cos_theta > threshold_cast,
             cos_theta_m,
-            cos_theta - self.mm,
+            cos_theta - mm_cast,
         )
 
         # One-hot mask for the true class
-        one_hot = tf.one_hot(tf.cast(labels, tf.int32), self.num_classes)
+        one_hot = tf.one_hot(tf.cast(labels, tf.int32), self.num_classes, dtype=dtype)
 
         # Replace true-class cosine with margin-shifted version
-        logits = one_hot * cos_theta_m + (1.0 - one_hot) * cos_theta
+        logits = one_hot * cos_theta_m + (one_cast - one_hot) * cos_theta
 
-        return self.scale * logits
+        return tf.cast(self.scale, dtype) * logits
 
     def get_config(self):
         cfg = super().get_config()
