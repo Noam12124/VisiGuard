@@ -30,7 +30,7 @@ from utils    import (
     build_gallery_embeddings,
 )
 
-# ── פונקציית העזר לנרמול (פותרת את שגיאת ה-Deserialization) ──────────────
+# ── פונקציית עזר לנרמול (פותרת את שגיאת ה-Deserialization) ──────────────
 
 def _l2_norm(x):
     return tf.math.l2_normalize(x, axis=1)
@@ -50,7 +50,7 @@ def get_embedding_model(path: str = config.BEST_EMBEDDING_MODEL):
             )
         print(f"[inference] Loading model from {path}…")
         
-        # עדכון מילון ה-custom_objects עם פונקציית הנרמול
+        # עדכון מילון ה-custom_objects עם פונקציית הנרמול החסרה
         custom_objs = {
             "ArcFaceLayer": __import__("arcface").ArcFaceLayer,
             "_l2_norm": _l2_norm
@@ -75,7 +75,7 @@ def embed_face_crop(face_crop_bgr: np.ndarray, model) -> np.ndarray:
 
     Returns:
         embedding: (512,) float32 L2-normalised vector.
-        """
+    """
     # Convert BGR → RGB, scale to [0, 255] float32
     img_rgb = cv2.cvtColor(face_crop_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
     batch   = np.expand_dims(img_rgb, 0)           # (1, 112, 112, 3)
