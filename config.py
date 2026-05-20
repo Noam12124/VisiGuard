@@ -23,7 +23,13 @@ EMBEDDING_DIM   = 512
 NUM_CHANNELS    = 3
 
 # ── Dataset ────────────────────────────────────────────────────────────────
-MIN_IMAGES_PER_CLASS  = 5
+# [FIX-2] Raised from 5 → 15.  ArcFace needs enough intra-class variation
+# to learn a tight angular cluster; 5 images is far too sparse.
+# Effect on LFW: reduces identities from ~1680 to ~158 but each has ≥15
+# images, giving the loss more signal per identity per epoch.
+# For CASIA / VGGFace2 (thousands of identities with 30-50 images each)
+# you can raise this to 20 or 30 without losing identities.
+MIN_IMAGES_PER_CLASS  = 15
 VALIDATION_SPLIT      = 0.15
 TEST_SPLIT            = 0.10
 RANDOM_SEED           = 42
