@@ -25,7 +25,7 @@ def download_with_tfds():
             person_id/
                 img.jpg
     """
-    print("Downloading LFW dataset...")
+    print("Downloading LFW via TensorFlow Datasets...")
 
     ds = tfds.load("lfw", split="train", as_supervised=True)
 
@@ -34,7 +34,8 @@ def download_with_tfds():
     counts = {}
 
     for image, label in tfds.as_numpy(ds):
-        label = str(int(label.item()))
+        label = str(label)
+
         person_dir = os.path.join(LFW_EXTRACT_DIR, label)
         os.makedirs(person_dir, exist_ok=True)
 
@@ -45,7 +46,7 @@ def download_with_tfds():
         with open(img_path, "wb") as f:
             f.write(image)
 
-    print("Download complete.")
+    print("TFDS download + conversion done.")
 
 
 def extract_and_organise(
@@ -59,7 +60,7 @@ def extract_and_organise(
     Works directly on TFDS-generated folder.
     """
 
-    print("Organizing dataset...")
+    print(f"Using dataset at: {extract_dir}")
 
     lfw_root = extract_dir
 
@@ -94,10 +95,9 @@ def extract_and_organise(
 
         kept += 1
 
-    print("\nDone.")
-    print(f"Kept: {kept} identities (≥{min_images} images)")
-    print(f"Skipped: {skipped} identities")
-    print(f"Output folder: {out_dir}")
+    print(f"\nDone!  {kept} identities kept  (≥{min_images} images each)")
+    print(f"       {skipped} identities skipped")
+    print(f"\nDataset ready at: {out_dir}")
 
     return kept
 
@@ -123,7 +123,7 @@ def main():
         min_images=args.min_images,
     )
 
-    print("\nNext step: run train.py")
+    print("\nNext step: python train.py")
 
 
 if __name__ == "__main__":
