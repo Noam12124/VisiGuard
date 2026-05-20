@@ -104,16 +104,17 @@ def compare_two_images(img1_path: str, img2_path: str) -> dict:
 
     results = {}
     for label, path in [("img1", img1_path), ("img2", img2_path)]:
-        # קריאה חסינת רווחים וסוגריים בנתיב על ידי שימוש במערך בייטים גולמי
+        # קריאה חסינת רווחים וסוגריים בנתיב על ידי שימוש במערך בייטים גולמי עם תמיכת דיבאג מורחבת
         try:
             with open(path, "rb") as f:
                 img_array = np.frombuffer(f.read(), dtype=np.uint8)
             img_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] Failed to open/decode file at: {path}. Error: {e}")
             img_bgr = None
 
         if img_bgr is None:
-            raise ValueError(f"Could not read image: {path}")
+            raise ValueError(f"Could not read image: {path}. Check if file path is correct and accessible.")
 
         det = detector.detect_largest(img_bgr)
         if det is None:
@@ -400,12 +401,13 @@ def main():
             sys.exit(1)
         identifier = FaceIdentifier(gallery_dir=args.gallery, model_path=args.model)
         
-        # התאמת קריאה חסינת רווחים גם עבור מצב ה-identify ב-CLI
+        # התאמת קריאה חסינת רווחים וסוגריים גם עבור מצב ה-identify ב-CLI
         try:
             with open(args.img, "rb") as f:
                 img_array = np.frombuffer(f.read(), dtype=np.uint8)
             img_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] Failed to open/decode file at: {args.img}. Error: {e}")
             img_bgr = None
 
         if img_bgr is None:
