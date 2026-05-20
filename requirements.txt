@@ -1,0 +1,36 @@
+# Face Recognition Project — Python dependencies
+# Install in Colab with:  pip install -r requirements.txt
+
+# Core ML
+tensorflow>=2.13.0
+keras>=2.13.0
+
+# Computer vision
+opencv-python-headless>=4.8.0   # headless = no GUI deps (Colab-friendly)
+Pillow>=10.0.0
+
+# YOLO face detector
+ultralytics>=8.0.200
+
+# HuggingFace (for auto-downloading YOLO weights)
+huggingface_hub>=0.19.0
+
+# Data science
+numpy>=1.24.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+pandas>=2.0.0
+
+# Visualisation
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Optional — much faster rotation augmentation
+# tensorflow-addons>=0.22.0   # uncomment if available for your TF version
+
+# Optional — UMAP embedding visualisation
+# umap-learn>=0.5.4
+
+# Colab extras (already installed in Colab, listed for completeness)
+# ipython
+# google-colab

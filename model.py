@@ -1,111 +1,246 @@
+"""
+model.py — Face recognition CNN.
+
+Architecture:
+    Input (112×112×3)
+        │
+        ▼
+    EfficientNetV2-S  [ImageNet pretrained]
+        │
+        ▼
+    GlobalAveragePooling2D  → (1280,)
+    BatchNormalization
+        │
+        ▼
+    Dense(1024, no bias)  +  BatchNorm  +  PReLU  +  Dropout(0.4)
+        │
+        ▼
+    Dense(512, no bias, L2)  +  BatchNorm
+    L2-Normalise  ────────────────────  Embedding (512,) for inference
+        │
+        ▼  [training only]
+    ArcFaceLayer  →  Logits (num_classes,)
+
+Why EfficientNetV2-S?
+  • Stronger feature extractor than ResNet50V2 at the same FLOPs.
+  • Fused-MBConv blocks train faster and generalise better.
+  • Pretrained on ImageNet-21k (via the -S variant in TF) → better init.
+  • 112×112 input is within its efficient operating range.
+"""
+
 import tensorflow as tf
-from tensorflow.keras import layers, regularizers, Model
+from tensorflow.keras import layers, models, regularizers
+from tensorflow.keras.applications import (
+    EfficientNetV2S,
+    ResNet50V2,
+)
 import config
-import utils
-
-logger = utils.get_logger()
+from arcface import ArcFaceLayer
 
 
-# ─────────────────────────────────────────────
-# BACKBONE
-# ─────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────
 
-def _build_backbone():
-    backbone = tf.keras.applications.EfficientNetB0(
-        include_top=False,
-        weights="imagenet",
-        input_shape=config.IMAGE_SHAPE,
+def _get_backbone(name: str, input_shape: tuple):
+    """Return a pretrained backbone with top removed."""
+    kwargs = dict(
+        include_top    = False,
+        weights        = "imagenet",
+        input_shape    = input_shape,
+        pooling        = None,
     )
+    name = name.lower()
+    if name == "efficientnetv2s":
+        return EfficientNetV2S(include_preprocessing=False, **kwargs)
+    elif name == "resnet50v2":
+        return ResNet50V2(**kwargs)
+    elif name == "convnext_tiny":
+        try:
+            from tensorflow.keras.applications import ConvNeXtTiny
+            return ConvNeXtTiny(**kwargs)
+        except ImportError:
+            print("[model] ConvNeXtTiny not available; falling back to EfficientNetV2S.")
+            return EfficientNetV2S(include_preprocessing=False, **kwargs)
+    else:
+        raise ValueError(f"Unknown backbone: {name}")
 
-    backbone.trainable = False
-    return backbone
+
+def _l2_norm(x, name="embedding"):
+    return tf.math.l2_normalize(x, axis=1, name=name)
 
 
-# ─────────────────────────────────────────────
-# EMBEDDING MODEL (ArcFace-ready)
-# ─────────────────────────────────────────────
+# ── Main builder ───────────────────────────────────────────────────────────
 
-def build_model(num_classes: int):
+def build_model(num_classes: int, training: bool = True):
+    """
+    Build the complete model.
 
-    backbone = _build_backbone()
+    Args:
+        num_classes: Number of identities in the training set.
+        training:    If True, ArcFace head is attached (for training).
+                     If False, the model outputs only the L2-normalised
+                     512-dim embedding (for inference).
 
-    inputs = tf.keras.Input(shape=config.IMAGE_SHAPE, name="image")
+    Returns:
+        (full_model, embedding_model)
+          full_model      – has ArcFace logits output (use for training).
+          embedding_model – outputs the 512-d embedding (use for inference).
 
-    # EfficientNet expects 0–255 scale inputs explicitly processed
-    x = tf.keras.layers.Lambda(
-        lambda t: tf.keras.applications.efficientnet.preprocess_input(
-            t * 255.0
-        ),
-        name="preprocess"
-    )(inputs)
+    The embedding_model shares all weights with full_model; you never
+    need to copy weights between them.
+    """
+    input_shape = (*config.IMAGE_SIZE, config.NUM_CHANNELS)
 
-    # 🔥 CRITICAL BREAKTHROUGH FIX: Removed training=False hardcoding.
-    # Leaving this flag out allows Keras to automatically inject the execution loop context.
-    # It will safely keep BatchNorm frozen during Phase 1, and permit parameter updates during Phase 2.
-    x = backbone(x)
-    x = layers.GlobalAveragePooling2D()(x)
+    # ── Input ──────────────────────────────────────────────────────────────
+    img_input  = layers.Input(shape=input_shape, name="image_input")
+    label_input = layers.Input(shape=(), name="label_input", dtype=tf.int32)
 
-    # ─────────────────────────────────────────────
-    # EMBEDDING HEAD (Optimized for clean vector separation)
-    # ─────────────────────────────────────────────
+    # ── Preprocessing (backbone-specific normalisation) ────────────────────
+    # EfficientNetV2 expects pixels in [0, 255]; we normalise to [-1, 1].
+    x = layers.Rescaling(1.0 / 127.5, offset=-1.0, name="rescale")(img_input)
+
+    # ── Backbone ───────────────────────────────────────────────────────────
+    backbone = _get_backbone(config.BACKBONE, input_shape)
+    backbone.trainable = False   # Phase 1: frozen
+    x = backbone(x, training=False)
+
+    # ── Pooling + first BN ────────────────────────────────────────────────
+    x = layers.GlobalAveragePooling2D(name="gap")(x)
+    x = layers.BatchNormalization(name="bn_gap")(x)
+
+    # ── Bottleneck head ────────────────────────────────────────────────────
+    x = layers.Dense(
+        1024,
+        use_bias    = False,
+        kernel_regularizer = regularizers.l2(config.L2_REGULARIZER),
+        name        = "dense_1024",
+    )(x)
+    x = layers.BatchNormalization(name="bn_1024")(x)
+    x = layers.PReLU(shared_axes=[1], name="prelu")(x)
+    x = layers.Dropout(config.DROPOUT_RATE, name="dropout")(x)
+
+    # ── Embedding projection ───────────────────────────────────────────────
     x = layers.Dense(
         config.EMBEDDING_DIM,
-        kernel_initializer="glorot_uniform",
-        kernel_regularizer=regularizers.l2(config.L2_LAMBDA)
+        use_bias    = False,
+        kernel_regularizer = regularizers.l2(config.L2_REGULARIZER),
+        name        = "dense_512",
     )(x)
+    x = layers.BatchNormalization(name="bn_512")(x)
 
-    x = layers.BatchNormalization()(x)
-    x = layers.PReLU()(x)
+    # L2-normalise → unit-sphere embeddings
+    embedding = layers.Lambda(_l2_norm, name="embedding")(x)
 
-    # L2 normalize embeddings (essential for hyperspherical margin separation)
-    embeddings = layers.Lambda(
-        lambda t: tf.nn.l2_normalize(t, axis=1),
-        name="embeddings"
-    )(x)
+    # ── Embedding-only model (inference) ──────────────────────────────────
+    embedding_model = models.Model(
+        inputs  = img_input,
+        outputs = embedding,
+        name    = "embedding_model",
+    )
 
-    model = Model(inputs, embeddings, name="VisiGuard_Embedding")
+    if not training:
+        return None, embedding_model
 
-    logger.info("Embedding model built successfully")
+    # ── ArcFace head (training only) ──────────────────────────────────────
+    arcface_layer = ArcFaceLayer(
+        num_classes = num_classes,
+        margin      = config.ARCFACE_MARGIN,
+        scale       = config.ARCFACE_SCALE,
+        name        = "arcface",
+    )
+    logits = arcface_layer(embedding, labels=label_input, training=True)
 
-    # Attach backbone for tracking in phase unfreezing
-    model.backbone = backbone
+    full_model = models.Model(
+        inputs  = [img_input, label_input],
+        outputs = logits,
+        name    = "face_recognition_model",
+    )
 
-    return model
+    return full_model, embedding_model
 
 
-# ─────────────────────────────────────────────
-# UNFREEZE FOR PHASE 2
-# ─────────────────────────────────────────────
+def freeze_backbone(model):
+    """Freeze the backbone (Phase 1)."""
+    for layer in model.layers:
+        if hasattr(layer, "layers"):   # it's a sub-model (the backbone)
+            layer.trainable = False
+    print("[model] Backbone frozen.")
 
-def unfreeze_for_phase2(model):
 
-    backbone = getattr(model, "backbone", None)
+def unfreeze_top_layers(model, n: int = config.UNFREEZE_TOP_LAYERS):
+    """
+    Unfreeze the top `n` layers of the backbone (Phase 2).
+    BatchNorm layers inside the backbone remain in inference mode to
+    preserve stable statistics.
+    """
+    backbone = None
+    for layer in model.layers:
+        if hasattr(layer, "layers") and len(layer.layers) > 10:
+            backbone = layer
+            break
 
     if backbone is None:
-        raise ValueError("Backbone not attached")
+        print("[model] WARNING: could not find backbone sub-model to unfreeze.")
+        return
 
     backbone.trainable = True
-
-    # Freeze all layers first
-    for layer in backbone.layers:
-        layer.trainable = False
-
     total = len(backbone.layers)
-    start = max(0, total + config.UNFREEZE_FROM)
+    freeze_until = max(0, total - n)
+    for i, layer in enumerate(backbone.layers):
+        if i < freeze_until:
+            layer.trainable = False
+        else:
+            # Keep BatchNorm in inference mode — critical for stable fine-tuning.
+            if isinstance(layer, layers.BatchNormalization):
+                layer.trainable = False
+            else:
+                layer.trainable = True
 
-    # Unfreeze the deep blocks (except global BatchNorm tracking parameters)
-    for layer in backbone.layers[start:]:
-        if not isinstance(layer, layers.BatchNormalization):
-            layer.trainable = True
+    trainable_count = sum(1 for l in backbone.layers if l.trainable)
+    print(f"[model] Unfroze top {trainable_count} backbone layers "
+          f"(out of {total}; BN layers kept frozen).")
 
-    logger.info(f"Backbone partially unfrozen. Layers from index {start} to {total} are active.")
 
+def get_cosine_scheduler(
+    base_lr: float,
+    total_epochs: int,
+    warmup_epochs: int = 0,
+    min_lr: float = config.MIN_LR,
+):
+    """
+    Cosine annealing LR schedule with optional linear warmup.
+
+    Returns a tf.keras.callbacks.LearningRateScheduler-compatible function.
+    """
+    def schedule(epoch, lr):
+        if epoch < warmup_epochs:
+            return base_lr * (epoch + 1) / max(1, warmup_epochs)
+        progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
+        import math
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr + (base_lr - min_lr) * cosine
+
+    return schedule
+
+
+def compile_model(model, lr: float, clip_norm: float = config.GRADIENT_CLIP_NORM):
+    """Compile model with Adam + gradient clipping + sparse CE loss."""
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate = lr,
+        clipnorm      = clip_norm,
+    )
+    model.compile(
+        optimizer  = optimizer,
+        loss       = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics    = ["accuracy"],
+    )
     return model
 
 
-# ─────────────────────────────────────────────
-# SUMMARY
-# ─────────────────────────────────────────────
-
-def print_summary(model):
-    model.summary(expand_nested=False)
+def model_summary(model):
+    """Print summary and count trainable parameters."""
+    model.summary(line_length=100)
+    trainable     = sum(tf.size(w).numpy() for w in model.trainable_weights)
+    non_trainable = sum(tf.size(w).numpy() for w in model.non_trainable_weights)
+    print(f"\nTrainable params:     {trainable:,}")
+    print(f"Non-trainable params: {non_trainable:,}")
+    print(f"Total params:         {trainable + non_trainable:,}")
