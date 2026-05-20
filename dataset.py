@@ -234,7 +234,8 @@ def split_dataset(
     seed: int         = config.RANDOM_SEED,
 ) -> tuple:
     """
-    Stratified split → (train, val, test) tuples of (paths, labels).
+    Random split → (train, val, test) tuples of (paths, labels).
+    Stratification is turned off to allow small-sample identities to split smoothly.
     """
     test_frac = test_split / (1.0 - val_split)
 
@@ -242,13 +243,13 @@ def split_dataset(
         file_paths, labels,
         test_size    = val_split + test_split,
         random_state = seed,
-        stratify     = labels,
+        stratify     = None,
     )
     paths_val, paths_te, lbl_val, lbl_te = train_test_split(
         paths_tmp, lbl_tmp,
         test_size    = test_frac,
         random_state = seed,
-        stratify     = lbl_tmp,
+        stratify     = None,
     )
 
     print(f"[dataset] Split: train={len(lbl_tr):,}  "
