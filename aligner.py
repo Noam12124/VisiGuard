@@ -207,6 +207,17 @@ def align_face(
         Aligned face patch (112, 112, 3) uint8.
     """
     aligner = get_aligner()
-    if keypoints is not None and len(keypoints) >= 2:
-        return aligner.align_from_bbox_and_kpts(image, bbox, keypoints)
+    
+    if keypoints is not None:
+        # Convert PyTorch tensor to numpy array if it has a .cpu() attribute
+        if hasattr(keypoints, 'cpu'):
+            keypoints = keypoints.cpu().numpy()
+            
+        # Squeeze out extra batch/singleton dimensions (e.g., (1, 5, 2) -> (5, 2))
+        keypoints = np.squeeze(keypoints)
+        
+        # Ensure we have a valid 2D array of keypoints before proceeding
+        if keypoints.ndim == 2 and len(keypoints) >= 2:
+            return aligner.align_from_bbox_and_kpts(image, bbox, keypoints)
+            
     return aligner.crop_and_resize(image, bbox)
