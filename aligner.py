@@ -58,14 +58,6 @@ class FaceAligner:
     ) -> np.ndarray:
         """
         Align a face given the full image and both eye coordinates.
-
-        Args:
-            image:      Full BGR (or RGB) image as numpy array.
-            left_eye:   (x, y) pixel coordinate of the left eye centre.
-            right_eye:  (x, y) pixel coordinate of the right eye centre.
-
-        Returns:
-            Aligned face crop of shape (H, W, 3) as uint8.
         """
         left_eye  = np.array(left_eye,  dtype=np.float32)
         right_eye = np.array(right_eye, dtype=np.float32)
@@ -89,9 +81,10 @@ class FaceAligner:
         M = cv2.getRotationMatrix2D(eyes_centre, angle, scale)
 
         # ── 5. Adjust translation so the eyes land at the desired position ─
-        # After rotation the eye midpoint is at (tX, tY); shift to desired.
+        # Output width is index [1], Height is index [0]
         tX = self.output_size[1] * 0.5
         tY = self.output_size[0] * self.desired_left_eye[1]
+        
         M[0, 2] += (tX - eyes_centre[0])
         M[1, 2] += (tY - eyes_centre[1])
 
@@ -114,25 +107,22 @@ class FaceAligner:
         """
         Convenience wrapper: crop from bbox first, then align using
         eye keypoints that are in the original image coordinate space.
-
-        Args:
-            image:     Full image (H, W, 3) uint8.
-            bbox:      (x1, y1, x2, y2) bounding box in pixel coords.
-            keypoints: Array of shape (5, 2) or (5, 3) — columns are
-                       (x, y[, confidence]).  Order:
-                       [0]=left_eye [1]=right_eye [2]=nose
-                       [3]=mouth_left [4]=mouth_right
-
-        Returns:
-            Aligned face patch (output_H, output_W, 3) uint8.
         """
-        # Validate keypoints
+        h, w = image.shape[:2]
+        
         if keypoints is not None and len(keypoints) >= 2:
             left_eye_pt  = keypoints[config.LEFT_EYE_IDX,  :2].astype(float)
             right_eye_pt = keypoints[config.RIGHT_EYE_IDX, :2].astype(float)
 
-            # Only use keypoints if both are non-zero and inside the image
-            h, w = image.shape[:2]
+            # Auto-denormalize coordinates if they arrive as values between 0 and 1
+            if left_eye_pt[0] <= 1.0 and left_eye_pt[1] <= 1.0:
+                left_eye_pt[0] *= w
+                left_eye_pt[1] *= h
+            if right_eye_pt[0] <= 1.0 and right_eye_pt[1] <= 1.0:
+                right_eye_pt[0] *= w
+                right_eye_pt[1] *= h
+
+            # Spatial boundary check
             valid = (
                 left_eye_pt[0] > 0 and left_eye_pt[1] > 0 and
                 right_eye_pt[0] > 0 and right_eye_pt[1] > 0 and
@@ -152,8 +142,6 @@ class FaceAligner:
     ) -> np.ndarray:
         """
         Fallback: crop bounding box and resize (no rotation).
-
-        Adds a small margin (10%) around the bbox to avoid tight crops.
         """
         x1, y1, x2, y2 = bbox
         h_img, w_img   = image.shape[:2]
@@ -197,26 +185,15 @@ def align_face(
 ) -> np.ndarray:
     """
     Module-level convenience wrapper.
-
-    Args:
-        image:     Full BGR/RGB image.
-        bbox:      (x1, y1, x2, y2).
-        keypoints: (5, 2) or (5, 3) array, or None.
-
-    Returns:
-        Aligned face patch (112, 112, 3) uint8.
     """
     aligner = get_aligner()
     
     if keypoints is not None:
-        # Convert PyTorch tensor to numpy array if it has a .cpu() attribute
         if hasattr(keypoints, 'cpu'):
             keypoints = keypoints.cpu().numpy()
             
-        # Squeeze out extra batch/singleton dimensions (e.g., (1, 5, 2) -> (5, 2))
         keypoints = np.squeeze(keypoints)
         
-        # Ensure we have a valid 2D array of keypoints before proceeding
         if keypoints.ndim == 2 and len(keypoints) >= 2:
             return aligner.align_from_bbox_and_kpts(image, bbox, keypoints)
             
