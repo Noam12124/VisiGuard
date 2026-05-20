@@ -37,8 +37,8 @@ def download_with_tfds():
         image = sample["image"]
         label = sample["label"]
 
-        # convert label safely to string
-        label = str(int(label))
+        # ✅ FIX: label is bytes like b'George_W_Bush'
+        label = label.decode("utf-8")
 
         person_dir = os.path.join(LFW_EXTRACT_DIR, label)
         os.makedirs(person_dir, exist_ok=True)
