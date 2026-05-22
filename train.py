@@ -430,10 +430,8 @@ def main():
 
     print("[train] Building tf.data pipelines…")
 
-    # [FIX-C] Unpacking מותאם ומדויק ל-6 איברים (num_classes הופך לאיבר השישי)
     train_ds, val_ds, test_ds, class_names, val_ids, test_ids = build_datasets(
-        data_dir   = data_dir,
-        batch_size = args.batch_size,
+        data_dir = data_dir
     )
     num_classes = len(class_names)
     print(f"[train] Training on {num_classes} identities.")
