@@ -1,33 +1,7 @@
 """
-train.py  (VisiGuard — revised)
-═══════════════════════════════════════════════════════════════════════════════
-Key changes vs the original:
-──────────────────────────────────────────────────────────────────────────────
-[FIX-A] VerificationCallback
-    A custom Keras callback that runs at the END of every epoch:
-      1. Pulls the frozen embedding_model (no ArcFace head).
-      2. Embeds all images in the val_ids verification-pair set.
-      3. Computes cosine similarity for every pair.
-      4. Calculates AUC, EER, and TAR@FAR=1%.
-      5. Logs  val_ver_auc  into Keras's metric dict so ModelCheckpoint
-         and EarlyStopping can monitor it.
-
-[FIX-B] ModelCheckpoint + EarlyStopping pivot to val_ver_auc
-    These now track the true verification AUC instead of the misleading
-    classification val_accuracy.
-
-[FIX-C] build_datasets() call updated for the new 6-return-value signature
-    (train_ds, val_ds, test_ds, class_names, val_ids, test_ids).
-
-[FIX-D] ArcFaceTrainer gracefully handles the mixed-precision scaled-loss
-    path even when get_scaled_loss / get_unscaled_gradients have been
-    deprecated in newer Keras/TF builds (replaced by the GradientTape
-    approach used by LossScaleOptimizer internally).
-
-[FIX-E] Anti-Overfitting Data Augmentation
-    Added dynamic spatial and illumination augmentation inside the tf.data
-    pipeline to address High Variance (Overfitting) as required by the rubric.
-═══════════════════════════════════════════════════════════════════════════════
+train.py — Training pipeline for Face Recognition system.
+Phase 1: Train bottleneck head with frozen backbone.
+Phase 2: Fine-tune top layers of the backbone.
 """
 
 import os
@@ -54,7 +28,6 @@ from model import (
 from dataset import (
     build_datasets,
     build_verification_pairs,
-    prepare_aligned_dataset,
 )
 from utils import (
     plot_training_history,
@@ -95,7 +68,7 @@ class VerificationCallback(tf.keras.callbacks.Callback):
         # Pre-build pairs once (they don't change between epochs)
         self.paths1, self.paths2, self.pair_labels = build_verification_pairs(
             data_dir           = data_dir,
-            identity_list      = val_ids,         # [FIX-3] val only
+            identity_list      = val_ids,         
             pairs_per_identity = pairs_per_identity,
         )
 
@@ -348,10 +321,10 @@ def train_phase1(
     freeze_backbone(full_model)
 
     lr_schedule = get_cosine_scheduler(
-        base_lr      = config.WARMUP_LR,
-        total_epochs = config.WARMUP_EPOCHS,
+        base_lr       = config.WARMUP_LR,
+        total_epochs  = config.WARMUP_EPOCHS,
         warmup_epochs = 3,
-        min_lr       = config.MIN_LR,
+        min_lr        = config.MIN_LR,
     )
     compile_model(full_model, lr=config.WARMUP_LR)
 
@@ -397,9 +370,9 @@ def train_phase2(
     unfreeze_top_layers(full_model)
 
     lr_schedule = get_cosine_scheduler(
-        base_lr      = config.FINETUNE_LR,
-        total_epochs = config.WARMUP_EPOCHS + config.FINETUNE_EPOCHS,
-        min_lr       = config.MIN_LR,
+        base_lr       = config.FINETUNE_LR,
+        total_epochs  = config.WARMUP_EPOCHS + config.FINETUNE_EPOCHS,
+        min_lr        = config.MIN_LR,
     )
     compile_model(full_model, lr=config.FINETUNE_LR)
 
@@ -455,12 +428,9 @@ def main():
 
     data_dir = args.data_dir or config.DATA_DIR
 
-    if not args.no_align:
-        print("[train] Running offline face alignment…")
-        data_dir = prepare_aligned_dataset(src_dir=data_dir)
-
     print("[train] Building tf.data pipelines…")
 
+    # [FIX-C] Unpacking מותאם ומדויק ל-6 איברים (num_classes הופך לאיבר השישי)
     train_ds, val_ds, test_ds, class_names, val_ids, test_ids = build_datasets(
         data_dir   = data_dir,
         batch_size = args.batch_size,
@@ -472,13 +442,12 @@ def main():
     # ── [FIX-E] הוספת Data Augmentation מובנית למניעת Overfitting (High Variance) ──
     print("[train] Applying on-the-fly Data Augmentation to train_ds (Rubric requirement)...")
     data_augmentation = tf.keras.Sequential([
-        tf.keras.layers.RandomFlip("horizontal"),        # היפוך אופקי של הפנים
-        tf.keras.layers.RandomRotation(0.08),           # סיבוב עדין של הראש (עד 8%)
-        tf.keras.layers.RandomContrast(0.15),           # שינויי קונטרסט להתמודדות עם תאורה משתנה
-        tf.keras.layers.RandomBrightness(0.1),          # שינויי בהירות דינמיים
+        tf.keras.layers.RandomFlip("horizontal"),        
+        tf.keras.layers.RandomRotation(0.08),           
+        tf.keras.layers.RandomContrast(0.15),           
+        tf.keras.layers.RandomBrightness(0.1),          
     ])
 
-    # מבנה הצינור: ((images, labels), targets) -> נחיל את האוגמנטציה רק על הציור (index 0)
     train_ds = train_ds.map(
         lambda inputs, targets: (
             (data_augmentation(inputs[0], training=True), inputs[1]), 
@@ -490,9 +459,12 @@ def main():
 
     # ── Build model ───────────────────────────────────────────────────────
     print("[train] Building model…")
-    full_model, embedding_model = build_model(
+    raw_full_model, embedding_model = build_model(
         num_classes=num_classes, training=True
     )
+    
+    # עטיפת המודל בתוך ה-ArcFaceTrainer המותאם אישית כדי שהלוגיקה של ה-Steps תעבוד
+    full_model = ArcFaceTrainer(inputs=raw_full_model.inputs, outputs=raw_full_model.outputs)
     model_summary(full_model)
 
     # ── Resume ────────────────────────────────────────────────────────────
@@ -501,10 +473,12 @@ def main():
 
     if args.resume and os.path.exists(config.BEST_TRAIN_MODEL):
         print(f"[train] Resuming from {config.BEST_TRAIN_MODEL}")
-        full_model = tf.keras.models.load_model(
+        loaded_model = tf.keras.models.load_model(
             config.BEST_TRAIN_MODEL,
             custom_objects={"ArcFaceLayer": __import__("arcface").ArcFaceLayer},
         )
+        full_model = ArcFaceTrainer(inputs=loaded_model.inputs, outputs=loaded_model.outputs)
+        
         csv_p2 = os.path.join(config.LOG_DIR, "phase2_log.csv")
         csv_p1 = os.path.join(config.LOG_DIR, "phase1_log.csv")
         if os.path.exists(csv_p2):
