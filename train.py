@@ -67,9 +67,9 @@ class VerificationCallback(tf.keras.callbacks.Callback):
 
         # Pre-build pairs once (they don't change between epochs)
         self.paths1, self.paths2, self.pair_labels = build_verification_pairs(
-            data_dir           = data_dir,
-            identity_list      = val_ids,         
-            pairs_per_identity = pairs_per_identity,
+            data_dir=config.DATA_DIR,
+            identities=val_ids,  # <--- השינוי כאן
+            num_pairs=config.NUM_VERIFICATION_PAIRS
         )
 
         # Cache of unique paths → avoid re-embedding the same image twice
