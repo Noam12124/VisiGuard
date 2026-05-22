@@ -128,7 +128,7 @@ def build_model(num_classes: int, training: bool = True):
     x = layers.BatchNormalization(name="bn_512")(x)
 
     # L2-normalise → unit-sphere embeddings
-    embedding = layers.Lambda(_l2_norm, name="embedding")(x)
+    embedding = layers.UnitNormalization(axis=1, name="embedding")(x)
 
     # ── Embedding-only model (inference) ──────────────────────────────────
     embedding_model = models.Model(

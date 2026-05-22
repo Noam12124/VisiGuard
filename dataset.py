@@ -26,497 +26,310 @@ Key changes vs the original:
     race condition).  Added explicit guard + skip counter.
 
 [FIX-5] build_datasets() now returns val_identities + test_identities
-    so train.py can pass them straight to the verification callback without
-    re-scanning the disk.
-═══════════════════════════════════════════════════════════════════════════════
+    so train.py can pass them to the verification matching callback.
 """
 
 import os
-import json
+import glob
 import numpy as np
 import cv2
 import tensorflow as tf
-from sklearn.model_selection import train_test_split
-
+from tensorflow.keras import layers
 import config
-from aligner import FaceAligner
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Offline alignment
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Custom Augmentation Layer for Occlusion ────────────────────────────────
 
-def prepare_aligned_dataset(
-    src_dir: str = config.DATA_DIR,
-    dst_dir: str = None,
-    aligner: FaceAligner = None,
-) -> str:
+class RandomOcclusionErasing(layers.Layer):
     """
-    Walk src_dir, align every face with Haar-cascade eye detection, write
-    results to dst_dir (src_dir + '_aligned' by default).
-
-    Changes vs original:
-      • Skips the whole folder if dst_dir already exists (unchanged).
-      • [FIX-4] Explicitly skips files where cv2.imread returns None and
-        increments a skip counter so you can see how many images are corrupt.
-      • Haar-cascade fallback now writes the full-frame resize rather than
-        silently producing a black image when eyes aren't found.
+    Simulates real-world occlusions (masks, sunglasses, hats) by randomly 
+    erasing a rectangular patch from the face image to improve robustness.
     """
-    if dst_dir is None:
-        dst_dir = src_dir.rstrip("/\\") + "_aligned"
+    def __init__(self, p=0.25, sl=0.02, sh=0.2, r1=0.3, **kwargs):
+        super().__init__(**kwargs)
+        self.p = p
+        self.sl = sl
+        self.sh = sh
+        self.r1 = r1
 
-    if os.path.exists(dst_dir):
-        print(f"[dataset] Aligned dataset already exists at {dst_dir}. Skipping.")
-        return dst_dir
-
-    if aligner is None:
-        aligner = FaceAligner()
-
-    eye_cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_eye.xml"
-    )
-
-    identities = sorted([
-        d for d in os.listdir(src_dir)
-        if os.path.isdir(os.path.join(src_dir, d))
-    ])
-
-    total_written = 0
-    total_skipped = 0  # [FIX-4] explicit skip counter
-
-    for identity in identities:
-        in_folder  = os.path.join(src_dir,  identity)
-        out_folder = os.path.join(dst_dir,  identity)
-        os.makedirs(out_folder, exist_ok=True)
-
-        image_files = [
-            f for f in os.listdir(in_folder)
-            if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp"))
-        ]
-
-        for fname in image_files:
-            src_path = os.path.join(in_folder, fname)
-            dst_path = os.path.join(out_folder, fname)
-
-            if os.path.exists(dst_path):
-                total_written += 1
-                continue
-
-            img_bgr = cv2.imread(src_path)
-
-            # [FIX-4] Hard guard — skip corrupt / unreadable files.
-            if img_bgr is None or img_bgr.size == 0:
-                total_skipped += 1
-                continue
-
-            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            eyes = eye_cascade.detectMultiScale(
-                gray, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20)
+    def call(self, inputs, training=None):
+        if not training:
+            return inputs
+        
+        h = tf.shape(inputs)[1]
+        w = tf.shape(inputs)[2]
+        c = tf.shape(inputs)[3]
+        
+        def erase_single_img(img):
+            if tf.random.uniform([]) > self.p:
+                return img
+            
+            img_area = tf.cast(h * w, tf.float32)
+            target_area = tf.random.uniform([], self.sl, self.sh) * img_area
+            aspect_ratio = tf.random.uniform([], self.r1, 1 / self.r1)
+            
+            cut_h = tf.cast(tf.math.round(tf.math.sqrt(target_area * aspect_ratio)), tf.int32)
+            cut_w = tf.cast(tf.math.round(tf.math.sqrt(target_area / aspect_ratio)), tf.int32)
+            
+            cut_h = tf.minimum(cut_h, h - 1)
+            cut_w = tf.minimum(cut_w, w - 1)
+            
+            cut_h = tf.maximum(cut_h, 2)
+            cut_w = tf.maximum(cut_w, 2)
+            
+            h1 = tf.cast(tf.random.uniform([], 0, tf.cast(h - cut_h, tf.float32)), tf.int32)
+            w1 = tf.cast(tf.random.uniform([], 0, tf.cast(w - cut_w, tf.float32)), tf.int32)
+            
+            noise = tf.random.uniform(tf.stack([cut_h, cut_w, c]), 0.0, 1.0)
+            
+            padding_top = h1
+            padding_bottom = h - h1 - cut_h
+            padding_left = w1
+            padding_right = w - w1 - cut_w
+            
+            patch_mask = tf.pad(
+                tf.zeros([cut_h, cut_w, c]),
+                [[padding_top, padding_bottom], [padding_left, padding_right], [0, 0]],
+                constant_values=1.0
             )
+            patch_noise = tf.pad(
+                noise,
+                [[padding_top, padding_bottom], [padding_left, padding_right], [0, 0]],
+                constant_values=0.0
+            )
+            
+            return img * patch_mask + patch_noise * (1.0 - patch_mask)
 
-            if len(eyes) >= 2:
-                eyes = sorted(eyes, key=lambda e: e[0])
-                left_eye_centre = (
-                    int(eyes[0][0] + eyes[0][2] / 2),
-                    int(eyes[0][1] + eyes[0][3] / 2),
-                )
-                right_eye_centre = (
-                    int(eyes[1][0] + eyes[1][2] / 2),
-                    int(eyes[1][1] + eyes[1][3] / 2),
-                )
-                aligned = aligner.align(img_bgr, left_eye_centre, right_eye_centre)
-            else:
-                # [FIX-4] Fallback: plain centre-crop of the full frame.
-                h, w = img_bgr.shape[:2]
-                aligned = aligner.crop_and_resize(img_bgr, (0, 0, w, h))
+        return tf.map_fn(erase_single_img, inputs, fn_output_signature=tf.TensorSpec(shape=[None, None, 3], dtype=tf.float32))
 
-            # Final size guard before writing.
-            if aligned is None or aligned.size == 0:
-                total_skipped += 1
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({
+            "p": self.p,
+            "sl": self.sl,
+            "sh": self.sh,
+            "r1": self.r1
+        })
+        return cfg
+
+
+# ── Data Augmentation Pipeline ─────────────────────────────────────────────
+
+def get_augmentation_pipeline():
+    """Builds an on-the-fly image augmentation sequential block using configuration parameters."""
+    return tf.keras.Sequential([
+        layers.RandomFlip("horizontal") if config.AUGMENT_FLIP else layers.Layer(),
+        layers.RandomRotation(factor=config.AUGMENT_ROTATION / 360.0, fill_mode="constant"),
+        layers.RandomZoom(height_factor=config.AUGMENT_ZOOM, width_factor=config.AUGMENT_ZOOM, fill_mode="constant"),
+        layers.RandomBrightness(factor=config.AUGMENT_BRIGHTNESS),
+        layers.RandomContrast(factor=config.AUGMENT_CONTRAST),
+        RandomOcclusionErasing(p=0.25)
+    ], name="data_augmentation")
+
+
+# ── Parse and Load Image Function for tf.data ─────────────────────────────
+
+def _parse_function(filename, label):
+    """Reads image file, decodes, resizes, and normalizes safely."""
+    image_string = tf.io.read_file(filename)
+    image = tf.image.decode_jpeg(image_string, channels=config.NUM_CHANNELS)
+    image = tf.image.resize(image, config.IMAGE_SIZE)
+    image = tf.cast(image, tf.float32) / 255.0
+    return image, label
+
+
+# ── Offline Dataset Alignment Hardening ────────────────────────────────────
+
+def align_dataset_offline(raw_dir: str, out_dir: str):
+    """
+    Performs offline face detection and alignment using YOLOv8-face.
+    [FIX-4] Hardened to catch race conditions and corrupted/empty images.
+    """
+    from detector import get_detector
+    
+    if not os.path.exists(raw_dir):
+        raise FileNotFoundError(f"Raw directory not found: {raw_dir}")
+        
+    detector = get_detector()
+    os.makedirs(out_dir, exist_ok=True)
+    
+    identities = [d for d in os.listdir(raw_dir) if os.path.isdir(os.path.join(raw_dir, d))]
+    skipped_corrupted = 0
+    total_processed = 0
+    
+    print(f"[dataset] Starting offline alignment from {raw_dir} to {out_dir}...")
+    
+    for identity in identities:
+        src_id_dir = os.path.join(raw_dir, identity)
+        dst_id_dir = os.path.join(out_dir, identity)
+        os.makedirs(dst_id_dir, exist_ok=True)
+        
+        imgs = glob.glob(os.path.join(src_id_dir, "*.*"))
+        for img_path in imgs:
+            if not img_path.lower().endswith(('.jpg', '.jpeg', '.png')):
                 continue
+                
+            # [FIX-4] Guard against empty file allocations in cloud drives
+            if not os.path.exists(img_path) or os.path.getsize(img_path) == 0:
+                skipped_corrupted += 1
+                continue
+                
+            img_bgr = cv2.imread(img_path)
+            if img_bgr is None:
+                skipped_corrupted += 1
+                continue
+                
+            total_processed += 1
+            detections = detector.detect_faces(img_bgr, conf_threshold=config.FACE_CONF_THRESHOLD)
+            
+            if len(detections) == 0:
+                h, w = img_bgr.shape[:2]
+                sz = min(h, w)
+                x1, y1 = (w - sz) // 2, (h - sz) // 2
+                crop = img_bgr[y1:y1+sz, x1:x1+sz]
+                if crop.size > 0:
+                    aligned = cv2.resize(crop, config.IMAGE_SIZE, interpolation=cv2.INTER_CUBIC)
+                else:
+                    skipped_corrupted += 1
+                    continue
+            else:
+                best_det = max(detections, key=lambda x: x["confidence"])
+                aligned = best_det["face_crop"]
+                
+            out_path = os.path.join(dst_id_dir, os.path.basename(img_path))
+            cv2.imwrite(out_path, aligned)
+            
+    print(f"[dataset] Alignment complete. Aligned: {total_processed} images. Skipped/Corrupted: {skipped_corrupted}")
 
-            cv2.imwrite(dst_path, aligned)
-            total_written += 1
 
-        if total_written % 1000 == 0 and total_written > 0:
-            print(f"  [align] {total_written:,} written …", end="\r")
+# ── Identity Disjoint Splitting and Dataset Creation ───────────────────────
 
-    print(
-        f"\n[dataset] Alignment done.  "
-        f"Written: {total_written:,}   Skipped (corrupt): {total_skipped:,}"
-    )
-    print(f"[dataset] Aligned dataset at: {dst_dir}")
-    return dst_dir
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Class catalogue
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_class_catalogue(
-    data_dir: str,
-    min_images: int = config.MIN_IMAGES_PER_CLASS,
-) -> tuple[list[str], dict[str, int]]:
+def build_datasets(data_dir: str = config.DATA_DIR):
     """
-    Scan data_dir and return (class_names, class_to_idx).
-    Only identities with ≥ min_images images are kept.
-
-    With [FIX-2] config.MIN_IMAGES_PER_CLASS is now 15, giving ArcFace
-    enough intra-class samples to form tight angular clusters.
+    Scans data directory, filters sparse classes, splits identities cleanly (80/10/10),
+    and sets up optimized training, validation, and testing tf.data streams.
     """
-    identities = sorted([
+    if not os.path.exists(data_dir):
+        raise FileNotFoundError(f"Dataset directory not found at: {data_dir}")
+
+    all_identities = sorted([
         d for d in os.listdir(data_dir)
         if os.path.isdir(os.path.join(data_dir, d))
     ])
 
-    class_names = []
+    valid_identities = []
+    identity_to_images = {}
+
+    print(f"[dataset] Scanning identities in {data_dir}...")
+    
+    # [FIX-2] Filter identities by MIN_IMAGES_PER_CLASS
+    for identity in all_identities:
+        idir = os.path.join(data_dir, identity)
+        imgs = glob.glob(os.path.join(idir, "*.[jJ][pP][gG]")) + \
+               glob.glob(os.path.join(idir, "*.[jJ][pP][eE][gG]")) + \
+               glob.glob(os.path.join(idir, "*.[sS][vV][gG]")) + \
+               glob.glob(os.path.join(idir, "*.[pP][nN][gG]"))
+        
+        valid_imgs = [f for f in imgs if os.path.exists(f) and os.path.getsize(f) > 0]
+        if len(valid_imgs) >= config.MIN_IMAGES_PER_CLASS:
+            valid_identities.append(identity)
+            identity_to_images[identity] = sorted(valid_imgs)
+
+    print(f"[dataset] Total identities: {len(all_identities)} | Kept (≥{config.MIN_IMAGES_PER_CLASS} images): {len(valid_identities)}")
+
+    if not valid_identities:
+        raise ValueError(f"Zero identities passed the minimum requirement of {config.MIN_IMAGES_PER_CLASS} images.")
+
+    # [FIX-1] Split on identity level first to guarantee zero data leakage
+    rng = np.random.default_rng(config.RANDOM_SEED)
+    shuffled_identities = list(valid_identities)
+    rng.shuffle(shuffled_identities)
+
+    n_total = len(shuffled_identities)
+    n_train = int(n_total * 0.80)
+    n_val   = int(n_total * 0.10)
+
+    train_identities = shuffled_identities[:n_train]
+    val_identities   = shuffled_identities[n_train:n_train + n_val]
+    test_identities  = shuffled_identities[n_train + n_val:]
+
+    print(f"[dataset] Identity Splits: {len(train_identities)} train | {len(val_identities)} val | {len(test_identities)} test")
+
+    # Map only training identities to continuous categorical classes for classification loss
+    train_id_to_label = {identity: idx for idx, identity in enumerate(train_identities)}
+
+    def gather_split_paths_and_labels(identity_list, is_train=False):
+        paths, labels = [], []
+        for identity in identity_list:
+            for img_path in identity_to_images[identity]:
+                paths.append(img_path)
+                labels.append(train_id_to_label[identity] if is_train else -1)
+        return paths, labels
+
+    train_paths, train_labels = gather_split_paths_and_labels(train_identities, is_train=True)
+    val_paths, val_labels     = gather_split_paths_and_labels(val_identities, is_train=False)
+    test_paths, test_labels   = gather_split_paths_and_labels(test_identities, is_train=False)
+
+    # Building tf.data pipelines
+    train_ds = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
+    val_ds   = tf.data.Dataset.from_tensor_slices((val_paths, val_labels))
+    test_ds  = tf.data.Dataset.from_tensor_slices((test_paths, test_labels))
+
+    train_ds = train_ds.shuffle(buffer_size=len(train_paths), seed=config.RANDOM_SEED)
+    train_ds = train_ds.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
+    
+    # On-the-fly augmentation execution
+    aug_pipeline = get_augmentation_pipeline()
+    train_ds = train_ds.batch(config.BATCH_SIZE)
+    train_ds = train_ds.map(lambda x, y: (aug_pipeline(x, training=True), y), num_parallel_calls=tf.data.AUTOTUNE)
+    train_ds = train_ds.prefetch(buffer_size=tf.data.AUTOTUNE)
+
+    val_ds = val_ds.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE).batch(config.BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+    test_ds = test_ds.map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE).batch(config.BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+
+    # [FIX-5] Returns val and test identity sets for proper callback validation tracking
+    return train_ds, val_ds, test_ds, val_identities, test_identities, len(train_identities)
+
+
+# ── Verification Pairs Construction ────────────────────────────────────────
+
+def build_verification_pairs(data_dir: str, identities: list, num_pairs: int = 2000):
+    """
+    Generates balanced verification image pairs (50% genuine, 50% impostor)
+    drawn EXCLUSIVELY from the provided identity list [FIX-3].
+    """
+    rng = np.random.default_rng(config.RANDOM_SEED)
+    
+    class_images = {}
     for identity in identities:
-        folder = os.path.join(data_dir, identity)
-        n_imgs = sum(
-            1 for f in os.listdir(folder)
-            if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp"))
-        )
-        if n_imgs >= min_images:
-            class_names.append(identity)
-
-    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
-    print(
-        f"[dataset] Found {len(class_names)} identities "
-        f"(of {len(identities)} total, min_images={min_images})."
-    )
-    return class_names, class_to_idx
-
-
-def save_class_catalogue(class_names: list[str], path: str = None) -> None:
-    if path is None:
-        path = os.path.join(config.CHECKPOINT_DIR, "class_names.json")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(class_names, f, indent=2)
-    print(f"[dataset] Class catalogue saved → {path}")
-
-
-def load_class_catalogue(path: str = None) -> list[str]:
-    if path is None:
-        path = os.path.join(config.CHECKPOINT_DIR, "class_names.json")
-    with open(path) as f:
-        return json.load(f)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# [FIX-1]  Identity-disjoint splitting
-# ─────────────────────────────────────────────────────────────────────────────
-
-def split_identities(
-    class_names: list[str],
-    val_frac:    float = config.VALIDATION_SPLIT,   # default 0.15
-    test_frac:   float = config.TEST_SPLIT,         # default 0.10
-    seed:        int   = config.RANDOM_SEED,
-) -> tuple[list[str], list[str], list[str]]:
-    """
-    Split the list of IDENTITY NAMES into train / val / test buckets.
-
-    Why this matters
-    ────────────────
-    The old code split individual IMAGE PATHS with stratify=labels.  When an
-    identity has many correlated frames (same lighting, same session), some
-    frames land in train and some in val.  The model sees the val face during
-    training → inflated val_accuracy → misleading early-stopping signal.
-
-    By splitting on identity names first, EVERY image of a given person
-    belongs to exactly one split.  Val and test identities are completely
-    unseen during training, which is exactly what deployment looks like.
-
-    Returns
-    ───────
-    train_ids, val_ids, test_ids  — disjoint lists of identity name strings.
-    """
-    rng = np.random.default_rng(seed)
-    names = list(class_names)
-    rng.shuffle(names)
-
-    n       = len(names)
-    n_test  = max(1, int(n * test_frac))
-    n_val   = max(1, int(n * val_frac))
-    n_train = n - n_val - n_test
-
-    train_ids = names[:n_train]
-    val_ids   = names[n_train : n_train + n_val]
-    test_ids  = names[n_train + n_val:]
-
-    print(
-        f"[dataset] Identity split (disjoint):  "
-        f"train={len(train_ids)}  val={len(val_ids)}  test={len(test_ids)}"
-    )
-    return train_ids, val_ids, test_ids
-
-
-def _collect_files(
-    data_dir:     str,
-    identity_list: list[str],
-    class_to_idx:  dict[str, int],
-) -> tuple[list[str], list[int]]:
-    """Return (file_paths, labels) for every image belonging to identity_list."""
-    file_paths: list[str] = []
-    labels:     list[int] = []
-
-    for name in identity_list:
-        folder = os.path.join(data_dir, name)
-        idx    = class_to_idx[name]
-        for fname in sorted(os.listdir(folder)):
-            if fname.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp")):
-                file_paths.append(os.path.join(folder, fname))
-                labels.append(idx)
-
-    return file_paths, labels
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# tf.data pipeline
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _load_and_decode(path: tf.Tensor) -> tf.Tensor:
-    """Read → decode → resize → float32 in [0, 255]."""
-    raw = tf.io.read_file(path)
-    img = tf.image.decode_image(raw, channels=3, expand_animations=False)
-    img = tf.image.resize(img, config.IMAGE_SIZE, method="bilinear")
-    img = tf.cast(img, tf.float32)
-    return img
-
-
-@tf.function
-def _augment(image: tf.Tensor) -> tf.Tensor:
-    """Standard augmentation for training images."""
-    if config.AUGMENT_FLIP:
-        image = tf.image.random_flip_left_right(image)
-
-    image = tf.image.random_brightness(image, config.AUGMENT_BRIGHTNESS)
-    image = tf.image.random_contrast(
-        image,
-        1.0 - config.AUGMENT_CONTRAST,
-        1.0 + config.AUGMENT_CONTRAST,
-    )
-    image = tf.image.random_saturation(
-        image,
-        1.0 - config.AUGMENT_SATURATION,
-        1.0 + config.AUGMENT_SATURATION,
-    )
-    image = tf.image.random_hue(image, config.AUGMENT_HUE)
-
-    # Random rotation via tensorflow_addons (no-op fallback if not installed)
-    angle_rad = (
-        tf.random.uniform([], -config.AUGMENT_ROTATION, config.AUGMENT_ROTATION)
-        * (3.14159265 / 180.0)
-    )
-    image = _rotate(image, angle_rad)
-
-    # Random zoom
-    zoom  = tf.random.uniform([], 1.0 - config.AUGMENT_ZOOM, 1.0 + config.AUGMENT_ZOOM)
-    h, w  = config.IMAGE_SIZE
-    new_h = tf.clip_by_value(
-        tf.cast(tf.round(tf.cast(h, tf.float32) / zoom), tf.int32), 1, h
-    )
-    new_w = tf.clip_by_value(
-        tf.cast(tf.round(tf.cast(w, tf.float32) / zoom), tf.int32), 1, w
-    )
-    image = tf.image.resize_with_crop_or_pad(image, new_h, new_w)
-    image = tf.image.resize(image, [h, w])
-
-    return tf.clip_by_value(image, 0.0, 255.0)
-
-
-def _rotate(image: tf.Tensor, angle_rad: tf.Tensor) -> tf.Tensor:
-    try:
-        import tensorflow_addons as tfa
-        return tfa.image.rotate(image, angle_rad, interpolation="BILINEAR")
-    except ImportError:
-        return image   # rotation silently disabled when tfa is absent
-
-
-def _make_dataset(
-    file_paths: list[str],
-    labels:     list[int],
-    augment:    bool,
-    shuffle:    bool,
-    batch_size: int = config.BATCH_SIZE,
-) -> tf.data.Dataset:
-    """
-    Build a tf.data.Dataset yielding  ((image, label), label).
-
-    The dual-label format is required because ArcFaceLayer.call() needs the
-    true class index at forward-pass time (to insert the angular margin only
-    for the true class column).  Keras .fit() receives:
-        inputs  = (image, label)
-        targets = label
-    """
-    paths_ds  = tf.data.Dataset.from_tensor_slices(file_paths)
-    labels_ds = tf.data.Dataset.from_tensor_slices(tf.cast(labels, tf.int32))
-    ds = tf.data.Dataset.zip((paths_ds, labels_ds))
-
-    if shuffle:
-        ds = ds.shuffle(
-            buffer_size=min(len(file_paths), 50_000),
-            seed=config.RANDOM_SEED,
-        )
-
-    def load_and_prep(path, label):
-        img = _load_and_decode(path)
-        if augment:
-            img = _augment(img)
-        return (img, label), label
-
-    ds = (
-        ds
-        .map(load_and_prep, num_parallel_calls=tf.data.AUTOTUNE)
-        .batch(batch_size, drop_remainder=True)
-        .prefetch(tf.data.AUTOTUNE)
-    )
-    return ds
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Top-level builder — returns identity lists for the callback
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_datasets(
-    data_dir:   str = None,
-    batch_size: int = config.BATCH_SIZE,
-) -> tuple[
-    tf.data.Dataset,   # train_ds
-    tf.data.Dataset,   # val_ds
-    tf.data.Dataset,   # test_ds
-    list[str],         # all class_names  (training identities, for ArcFace dim)
-    list[str],         # val_ids          [FIX-5] returned so callback can use them
-    list[str],         # test_ids         [FIX-5]
-]:
-    """
-    Full pipeline:  catalogue  →  identity-disjoint split  →  tf.data
-
-    Changes
-    ───────
-    [FIX-1] Uses split_identities() instead of image-level train_test_split.
-    [FIX-5] Returns val_ids and test_ids so train.py can pass them directly
-            to the VerificationCallback without re-scanning disk.
-
-    Returns
-    ───────
-    train_ds, val_ds, test_ds, class_names, val_ids, test_ids
-
-    NOTE: val_ds and test_ds are still returned as ArcFace-format datasets
-    so that the standard Keras val_accuracy metric is still tracked as a
-    secondary signal (useful for debugging).  The PRIMARY metric the
-    VerificationCallback reports is cosine-similarity AUC.
-    """
-    if data_dir is None:
-        aligned = config.DATA_DIR.rstrip("/\\") + "_aligned"
-        data_dir = aligned if os.path.exists(aligned) else config.DATA_DIR
-
-    # Build full catalogue (respects MIN_IMAGES_PER_CLASS from config)
-    all_names, class_to_idx = build_class_catalogue(data_dir)
-
-    # [FIX-1] Split on identities, not images
-    train_ids, val_ids, test_ids = split_identities(all_names)
-
-    # Remap labels so training identity indices are contiguous 0…N_train-1.
-    # Val/test identities get their own local indices ONLY for the val/test
-    # ArcFace datasets; the embedding callback ignores these labels entirely.
-    train_c2i  = {name: idx for idx, name in enumerate(train_ids)}
-    val_c2i    = {name: idx for idx, name in enumerate(val_ids)}
-    test_c2i   = {name: idx for idx, name in enumerate(test_ids)}
-
-    tr_paths, tr_labels = _collect_files(data_dir, train_ids, train_c2i)
-    va_paths, va_labels = _collect_files(data_dir, val_ids,   val_c2i)
-    te_paths, te_labels = _collect_files(data_dir, test_ids,  test_c2i)
-
-    print(
-        f"[dataset] Images:  train={len(tr_labels):,}  "
-        f"val={len(va_labels):,}  test={len(te_labels):,}"
-    )
-
-    train_ds = _make_dataset(tr_paths, tr_labels, augment=True,  shuffle=True,  batch_size=batch_size)
-    val_ds   = _make_dataset(va_paths, va_labels, augment=False, shuffle=False, batch_size=batch_size)
-    test_ds  = _make_dataset(te_paths, te_labels, augment=False, shuffle=False, batch_size=batch_size)
-
-    # Save the TRAINING catalogue (only train_ids are actual ArcFace classes)
-    save_class_catalogue(train_ids)
-
-    # [FIX-5] Return val/test identity names for the verification callback
-    return train_ds, val_ds, test_ds, train_ids, val_ids, test_ids
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# [FIX-3]  Verification pair builder — draws from a supplied identity list
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_verification_pairs(
-    data_dir:           str       = None,
-    identity_list:      list[str] = None,   # [FIX-3] NEW — pass val_ids or test_ids
-    pairs_per_identity: int       = config.EVAL_PAIRS_PER_CLASS,
-    seed:               int       = config.RANDOM_SEED,
-) -> tuple[list[str], list[str], list[int]]:
-    """
-    Build (path1, path2, is_same) triples for pairwise verification.
-
-    Genuine pairs  — two different images of the SAME person.
-    Impostor pairs — images of DIFFERENT people.
-    Returned label: 1 = same person, 0 = different.
-
-    Parameters
-    ──────────
-    identity_list : [FIX-3]
-        If provided, ONLY identities in this list are used.  Pass val_ids
-        (or test_ids) to ensure zero overlap with training identities.
-        If None, all identities in data_dir are used (backwards-compatible).
-
-    Returns
-    ───────
-    paths1, paths2, pair_labels
-    """
-    if data_dir is None:
-        aligned = config.DATA_DIR.rstrip("/\\") + "_aligned"
-        data_dir = aligned if os.path.exists(aligned) else config.DATA_DIR
-
-    rng = np.random.default_rng(seed)
-
-    # Collect image lists, restricted to identity_list if given
-    class_images: dict[str, list[str]] = {}
-    for identity in sorted(os.listdir(data_dir)):
-        if identity_list is not None and identity not in identity_list:
-            continue   # [FIX-3] skip training identities
-        folder = os.path.join(data_dir, identity)
-        if not os.path.isdir(folder):
-            continue
-        imgs = [
-            os.path.join(folder, f)
-            for f in sorted(os.listdir(folder))
-            if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".webp"))
-        ]
-        if len(imgs) >= 2:
-            class_images[identity] = imgs
-
-    identities = sorted(class_images.keys())
-    if len(identities) < 2:
-        raise ValueError(
-            f"[dataset] build_verification_pairs: need ≥2 identities, "
-            f"got {len(identities)}.  Check identity_list and data_dir."
-        )
+        idir = os.path.join(data_dir, identity)
+        imgs = glob.glob(os.path.join(idir, "*.[jJ][pP][gG]")) + \
+               glob.glob(os.path.join(idir, "*.[jJ][pP][eE][gG]")) + \
+               glob.glob(os.path.join(idir, "*.[pP][nN][gG]"))
+        class_images[identity] = sorted([f for f in imgs if os.path.exists(f) and os.path.getsize(f) > 0])
 
     paths1, paths2, pair_labels = [], [], []
+    n_genuine_target = num_pairs // 2
 
-    # ── Genuine pairs ─────────────────────────────────────────────────────
+    # ── Genuine pairs (Same person) ───────────────────────────────────────
+    per_identity = max(1, n_genuine_target // len(identities))
+    
     for identity in identities:
-        imgs    = class_images[identity]
-        # Cap pairs at pairs_per_identity; don't try to generate more than
-        # the combinatorial limit of the available images.
-        max_possible = len(imgs) * (len(imgs) - 1) // 2
-        n_pairs = min(pairs_per_identity, max_possible)
-        chosen: set[tuple[int, int]] = set()
+        imgs = class_images[identity]
+        if len(imgs) < 2:
+            continue
+        
+        chosen = set()
         attempts = 0
-        while len(chosen) < n_pairs and attempts < n_pairs * 10:
+        max_possible = len(imgs) * (len(imgs) - 1) // 2
+        target = min(per_identity, max_possible)
+        
+        while len(chosen) < target and attempts < target * 10:
             i, j = rng.choice(len(imgs), size=2, replace=False)
             pair = (min(i, j), max(i, j))
             chosen.add(pair)
             attempts += 1
+            
         for i, j in chosen:
             paths1.append(imgs[i])
             paths2.append(imgs[j])
@@ -545,11 +358,4 @@ def build_verification_pairs(
     paths2      = [paths2[i]      for i in order]
     pair_labels = [pair_labels[i] for i in order]
 
-    n_same  = sum(pair_labels)
-    n_diff  = len(pair_labels) - n_same
-    print(
-        f"[dataset] Verification pairs: "
-        f"{n_same:,} genuine + {n_diff:,} impostor = {len(pair_labels):,} total  "
-        f"(from {len(identities)} identities)"
-    )
     return paths1, paths2, pair_labels
