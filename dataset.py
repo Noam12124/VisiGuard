@@ -42,8 +42,8 @@ import config
 
 class RandomOcclusionErasing(layers.Layer):
     """
-    Simulates real-world occlusions (masks, sunglasses, hats) by randomly 
-    erasing a rectangular patch from the face image to improve robustness.
+    Simulates real-world occlusions by randomly erasing a patch.
+    Fixed for Mixed Precision compatibility.
     """
     def __init__(self, p=0.25, sl=0.02, sh=0.2, r1=0.3, **kwargs):
         super().__init__(**kwargs)
@@ -61,9 +61,13 @@ class RandomOcclusionErasing(layers.Layer):
         c = tf.shape(inputs)[3]
         
         def erase_single_img(img):
+            # Capture input dtype (float16 if mixed precision is on)
+            img_dtype = img.dtype
+            
             if tf.random.uniform([]) > self.p:
                 return img
             
+            # Logic stays the same
             img_area = tf.cast(h * w, tf.float32)
             target_area = tf.random.uniform([], self.sl, self.sh) * img_area
             aspect_ratio = tf.random.uniform([], self.r1, 1 / self.r1)
@@ -73,45 +77,40 @@ class RandomOcclusionErasing(layers.Layer):
             
             cut_h = tf.minimum(cut_h, h - 1)
             cut_w = tf.minimum(cut_w, w - 1)
-            
             cut_h = tf.maximum(cut_h, 2)
             cut_w = tf.maximum(cut_w, 2)
             
             h1 = tf.cast(tf.random.uniform([], 0, tf.cast(h - cut_h, tf.float32)), tf.int32)
             w1 = tf.cast(tf.random.uniform([], 0, tf.cast(w - cut_w, tf.float32)), tf.int32)
             
-            noise = tf.random.uniform(tf.stack([cut_h, cut_w, c]), 0.0, 1.0)
+            noise = tf.random.uniform(tf.stack([cut_h, cut_w, c]), 0.0, 1.0, dtype=img_dtype)
             
             padding_top = h1
             padding_bottom = h - h1 - cut_h
             padding_left = w1
             padding_right = w - w1 - cut_w
             
+            # Create masks and cast to input dtype to avoid float32/float16 mismatch
             patch_mask = tf.pad(
-                tf.zeros([cut_h, cut_w, c]),
+                tf.zeros([cut_h, cut_w, c], dtype=img_dtype),
                 [[padding_top, padding_bottom], [padding_left, padding_right], [0, 0]],
-                constant_values=1.0
+                constant_values=tf.cast(1.0, img_dtype)
             )
+            
             patch_noise = tf.pad(
                 noise,
                 [[padding_top, padding_bottom], [padding_left, padding_right], [0, 0]],
-                constant_values=0.0
+                constant_values=tf.cast(0.0, img_dtype)
             )
             
-            return img * patch_mask + patch_noise * (1.0 - patch_mask)
+            return img * patch_mask + patch_noise * (tf.cast(1.0, img_dtype) - patch_mask)
 
         return tf.map_fn(erase_single_img, inputs, fn_output_signature=tf.TensorSpec(shape=[None, None, 3], dtype=tf.float32))
 
     def get_config(self):
         cfg = super().get_config()
-        cfg.update({
-            "p": self.p,
-            "sl": self.sl,
-            "sh": self.sh,
-            "r1": self.r1
-        })
+        cfg.update({"p": self.p, "sl": self.sl, "sh": self.sh, "r1": self.r1})
         return cfg
-
 
 # ── Data Augmentation Pipeline ─────────────────────────────────────────────
 
