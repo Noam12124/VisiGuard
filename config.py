@@ -21,7 +21,7 @@ Key changes for from-scratch training (no pretrained weights):
 import os
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-BASE_DIR          = "/content/face_recognition_project"   # Colab root
+BASE_DIR = "/content/VisiGuard"
 DATA_DIR          = os.path.join(BASE_DIR, "data", "faces")
 GALLERY_DIR       = os.path.join(BASE_DIR, "data", "gallery")
 CHECKPOINT_DIR    = os.path.join(BASE_DIR, "checkpoints")
