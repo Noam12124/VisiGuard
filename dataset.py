@@ -129,10 +129,14 @@ def _parse_function(filename, label):
 
 def align_dataset_offline(raw_dir: str, out_dir: str):
     """
-    Offline face detection and alignment using YOLOv8-face.
-    Falls back to centre-crop + resize when no face is detected.
-    [FIX-4] Guards against 0-byte files and race-condition None reads.
+    Offline face detection and alignment using FaceDetector.
+    Uses detect_largest for stability.
+    Falls back to center crop if no face is found.
     """
+
+    import os
+    import glob
+    import cv2
     from detector import get_detector
 
     if not os.path.exists(raw_dir):
@@ -141,21 +145,25 @@ def align_dataset_offline(raw_dir: str, out_dir: str):
     detector = get_detector()
     os.makedirs(out_dir, exist_ok=True)
 
-    identities         = [d for d in os.listdir(raw_dir)
-                          if os.path.isdir(os.path.join(raw_dir, d))]
-    total_processed    = 0
-    skipped_corrupted  = 0
+    identities = [
+        d for d in os.listdir(raw_dir)
+        if os.path.isdir(os.path.join(raw_dir, d))
+    ]
+
+    total_processed = 0
+    skipped_corrupted = 0
 
     print(f"[dataset] Offline alignment: {raw_dir} → {out_dir}")
 
     for identity in identities:
-        src_id = os.path.join(raw_dir,  identity)
+        src_id = os.path.join(raw_dir, identity)
         dst_id = os.path.join(out_dir, identity)
         os.makedirs(dst_id, exist_ok=True)
 
         for img_path in glob.glob(os.path.join(src_id, "*.*")):
             if not img_path.lower().endswith(('.jpg', '.jpeg', '.png')):
                 continue
+
             if not os.path.exists(img_path) or os.path.getsize(img_path) == 0:
                 skipped_corrupted += 1
                 continue
@@ -166,26 +174,40 @@ def align_dataset_offline(raw_dir: str, out_dir: str):
                 continue
 
             total_processed += 1
-            dets = detector.detect_faces(img_bgr,
-                                         conf_threshold=config.FACE_CONF_THRESHOLD)
 
-            if len(dets) == 0:
-                h, w  = img_bgr.shape[:2]
-                sz    = min(h, w)
+            # ── FACE DETECTION ─────────────────────────────
+            best = detector.detect_largest(img_bgr)
+
+            if best is None:
+                # fallback: center crop
+                h, w = img_bgr.shape[:2]
+                sz = min(h, w)
                 x1, y1 = (w - sz) // 2, (h - sz) // 2
-                crop  = img_bgr[y1:y1 + sz, x1:x1 + sz]
+                crop = img_bgr[y1:y1 + sz, x1:x1 + sz]
+
                 if crop.size == 0:
                     skipped_corrupted += 1
                     continue
-                aligned = cv2.resize(crop, config.IMAGE_SIZE, interpolation=cv2.INTER_CUBIC)
-            else:
-                best   = max(dets, key=lambda d: d["confidence"])
-                aligned = best["face_crop"]
 
-            cv2.imwrite(os.path.join(dst_id, os.path.basename(img_path)), aligned)
+                aligned = cv2.resize(
+                    crop,
+                    config.IMAGE_SIZE,
+                    interpolation=cv2.INTER_CUBIC
+                )
+            else:
+                # IMPORTANT: detect_largest usually returns face crop OR bbox+crop
+                if isinstance(best, dict) and "face_crop" in best:
+                    aligned = best["face_crop"]
+                else:
+                    # fallback: assume it's already an image crop
+                    aligned = best
+
+            cv2.imwrite(
+                os.path.join(dst_id, os.path.basename(img_path)),
+                aligned
+            )
 
     print(f"[dataset] Done. Aligned: {total_processed}  Skipped/Corrupted: {skipped_corrupted}")
-
 
 def prepare_aligned_dataset(
     raw_dir: str = None,
