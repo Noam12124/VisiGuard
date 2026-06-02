@@ -56,17 +56,18 @@ from utils import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VerificationCallback(tf.keras.callbacks.Callback):
-    def __init__(self, embedding_model, data_dir, val_ids, 
-                 pairs_per_identity=15, embed_batch_size=64, run_every_n_epochs=1, verbose=True):
+    def __init__(self, embedding_model, data_dir, val_ids, embed_batch_size=64, run_every_n_epochs=1, verbose=True):
         super().__init__()
         self.embedding_model = embedding_model
         self.run_every_n_epochs = run_every_n_epochs
         self.verbose = verbose
         
-        # Prepare verification data
+        # FIX: Removed 'pairs_per_identity' as it is not supported by your dataset.py
         self.paths1, self.paths2, self.pair_labels = build_verification_pairs(
-            data_dir=data_dir, identities=val_ids, pairs_per_identity=pairs_per_identity
+            data_dir=data_dir, 
+            identities=val_ids
         )
+        
         self.all_paths = list(dict.fromkeys(self.paths1 + self.paths2))
         self._path_to_idx = {p: i for i, p in enumerate(self.all_paths)}
         self.embed_batch_size = embed_batch_size
@@ -188,7 +189,6 @@ def _build_callbacks(
             embedding_model    = embedding_model,
             data_dir           = data_dir,
             val_ids            = val_ids,
-            pairs_per_identity = 15,
             embed_batch_size   = 64,
             run_every_n_epochs = 1,
         ),
