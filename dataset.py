@@ -58,72 +58,41 @@ class RandomOcclusionErasing(layers.Layer):
         if not training:
             return inputs
 
-        h = tf.shape(inputs)[1]
-        w = tf.shape(inputs)[2]
-        c = tf.shape(inputs)[3]
+        # Now processing a single 3D image: (Height, Width, Channels)
+        h = tf.shape(inputs)[0]  # Index 0 is Height
+        w = tf.shape(inputs)[1]  # Index 1 is Width
+        c = tf.shape(inputs)[2]  # Index 2 is Channels
 
-        def erase_single(img):
-            img_dtype = img.dtype
-            if tf.random.uniform([]) > self.p:
-                return img
+        img_dtype = inputs.dtype
+        
+        # Apply probability test to the image directly
+        if tf.random.uniform([]) > self.p:
+            return inputs
 
-            img_area    = tf.cast(h * w, tf.float32)
-            target_area = tf.random.uniform([], self.sl, self.sh) * img_area
-            aspect      = tf.random.uniform([], self.r1, 1.0 / self.r1)
+        # Calculate bounding box sizes for erasing patch
+        img_area    = tf.cast(h * w, tf.float32)
+        target_area = tf.random.uniform([], self.sl, self.sh) * img_area
+        aspect      = tf.random.uniform([], self.r1, 1.0 / self.r1)
 
-            cut_h = tf.cast(tf.math.round(tf.math.sqrt(target_area * aspect)),     tf.int32)
-            cut_w = tf.cast(tf.math.round(tf.math.sqrt(target_area / aspect)),     tf.int32)
-            cut_h = tf.maximum(tf.minimum(cut_h, h - 1), 2)
-            cut_w = tf.maximum(tf.minimum(cut_w, w - 1), 2)
+        cut_h = tf.cast(tf.math.round(tf.math.sqrt(target_area * aspect)),     tf.int32)
+        cut_w = tf.cast(tf.math.round(tf.math.sqrt(target_area / aspect)),     tf.int32)
+        cut_h = tf.maximum(tf.minimum(cut_h, h - 1), 2)
+        cut_w = tf.maximum(tf.minimum(cut_w, w - 1), 2)
 
-            h1 = tf.cast(tf.random.uniform([], 0, tf.cast(h - cut_h, tf.float32)), tf.int32)
-            w1 = tf.cast(tf.random.uniform([], 0, tf.cast(w - cut_w, tf.float32)), tf.int32)
+        # Coordinate positioning
+        h1 = tf.cast(tf.random.uniform([], 0, tf.cast(h - cut_h, tf.float32)), tf.int32)
+        w1 = tf.cast(tf.random.uniform([], 0, tf.cast(w - cut_w, tf.float32)), tf.int32)
 
-            noise = tf.random.uniform(tf.stack([cut_h, cut_w, c]), 0.0, 1.0, dtype=img_dtype)
+        # Generate noise matching the patch dimension and input dtype
+        noise = tf.random.uniform(tf.stack([cut_h, cut_w, c]), 0.0, 1.0, dtype=img_dtype)
 
-            pad = [[h1, h - h1 - cut_h], [w1, w - w1 - cut_w], [0, 0]]
-            mask  = tf.pad(tf.zeros([cut_h, cut_w, c], dtype=img_dtype), pad,
-                           constant_values=tf.cast(1.0, img_dtype))
-            patch = tf.pad(noise, pad, constant_values=tf.cast(0.0, img_dtype))
-            return img * mask + patch * (tf.cast(1.0, img_dtype) - mask)
-
-        return tf.map_fn(
-            erase_single,
-            inputs,
-            fn_output_signature=tf.TensorSpec(shape=[None, None, 3], dtype=tf.float32),
-        )
-
-    def get_config(self):
-        cfg = super().get_config()
-        cfg.update({"p": self.p, "sl": self.sl, "sh": self.sh, "r1": self.r1})
-        return cfg
-
-
-# ── Augmentation pipeline ──────────────────────────────────────────────────
-
-def get_augmentation_pipeline():
-    """On-the-fly augmentation built from config parameters."""
-    return tf.keras.Sequential([
-        layers.RandomFlip("horizontal") if config.AUGMENT_FLIP else layers.Layer(),
-        layers.RandomRotation(factor=config.AUGMENT_ROTATION / 360.0, fill_mode="constant"),
-        layers.RandomZoom(height_factor=config.AUGMENT_ZOOM, width_factor=config.AUGMENT_ZOOM,
-                          fill_mode="constant"),
-        layers.RandomBrightness(factor=config.AUGMENT_BRIGHTNESS),
-        layers.RandomContrast(factor=config.AUGMENT_CONTRAST),
-        RandomOcclusionErasing(p=0.25),
-    ], name="data_augmentation")
-
-
-# ── Image parse function ───────────────────────────────────────────────────
-
-def _parse_function(filename, label):
-    """Read → decode JPEG → resize → normalise to [0, 1]."""
-    raw   = tf.io.read_file(filename)
-    image = tf.image.decode_jpeg(raw, channels=config.NUM_CHANNELS)
-    image = tf.image.resize(image, config.IMAGE_SIZE)
-    image = tf.cast(image, tf.float32) / 255.0
-    return image, label
-
+        # Construct pads and merge
+        pad = [[h1, h - h1 - cut_h], [w1, w - w1 - cut_w], [0, 0]]
+        mask  = tf.pad(tf.zeros([cut_h, cut_w, c], dtype=img_dtype), pad,
+                       constant_values=tf.cast(1.0, img_dtype))
+        patch = tf.pad(noise, pad, constant_values=tf.cast(0.0, img_dtype))
+        
+        return inputs * mask + patch * (tf.cast(1.0, img_dtype) - mask) 
 
 # ── Offline alignment ──────────────────────────────────────────────────────
 
