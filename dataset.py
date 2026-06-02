@@ -312,6 +312,7 @@ def build_datasets(data_dir: str = config.DATA_DIR):
           f"{len(val_identities)} val | {len(test_identities)} test identities")
 
     # Only training identities get classification labels
+    # Only training identities get classification labels
     train_id_to_label = {ident: idx for idx, ident in enumerate(train_identities)}
 
     def _gather(identity_list, is_train=False):
@@ -337,9 +338,11 @@ def build_datasets(data_dir: str = config.DATA_DIR):
         train_ds
         .shuffle(buffer_size=len(train_paths), seed=config.RANDOM_SEED)
         .map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
-        .batch(config.BATCH_SIZE)
+        # 1. Map augmentation FIRST to individual 3D images (112, 112, 3)
         .map(lambda x, y: (aug(x, training=True), y),
              num_parallel_calls=tf.data.AUTOTUNE)
+        # 2. Batch the fully processed images into 4D tensors LAST
+        .batch(config.BATCH_SIZE)
         .prefetch(tf.data.AUTOTUNE)
     )
     val_ds  = (val_ds
@@ -354,7 +357,6 @@ def build_datasets(data_dir: str = config.DATA_DIR):
     # [FIX-5] Correct return order: train_identities in position 4 so
     # train.py can unpack it as `class_names` and compute num_classes correctly.
     return train_ds, val_ds, test_ds, train_identities, val_identities, test_identities
-
 
 # ── Verification pair builder ──────────────────────────────────────────────
 
