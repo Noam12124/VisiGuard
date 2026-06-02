@@ -125,20 +125,46 @@ class VerificationCallback(tf.keras.callbacks.Callback):
         tar_1pct    = float(tpr[mask][-1]) if mask.any() else 0.0
         return {"auc": auc_val, "eer": eer, "tar_at_far1": tar_1pct}
 
-    def on_epoch_end(self, epoch: int, logs: dict = None):
+def on_epoch_end(self, epoch: int, logs: dict = None):
         if (epoch + 1) % self.run_every_n_epochs != 0:
             if logs is not None:
                 logs["val_ver_auc"] = logs.get("val_ver_auc", 0.0)
             return
 
-        t0       = time.time()
+        t0 = time.time()
+        
+        # 1. Extract raw embeddings
         all_embs = self._extract_all_embeddings()
 
-        embs1  = all_embs[[self._path_to_idx[p] for p in self.paths1]]
-        embs2  = all_embs[[self._path_to_idx[p] for p in self.paths2]]
-        sims   = np.sum(embs1 * embs2, axis=1)
+        # ── CRITICAL FIX: The "NaN" Shield ────────────────────────────────
+        # Force cast to float32 immediately
+        all_embs = all_embs.astype(np.float32)
+        
+        # Replace Infs/NaNs with 0.0 before doing any math
+        all_embs = np.nan_to_num(all_embs, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Normalize: Add epsilon 1e-8 to avoid division by zero
+        norms = np.linalg.norm(all_embs, axis=1, keepdims=True)
+        all_embs = all_embs / np.maximum(norms, 1e-8)
+        
+        # Ensure the normalization itself didn't create new NaNs
+        all_embs = np.nan_to_num(all_embs, nan=0.0)
+        # ──────────────────────────────────────────────────────────────────
+
+        # Extract pairs
+        embs1 = all_embs[[self._path_to_idx[p] for p in self.paths1]]
+        embs2 = all_embs[[self._path_to_idx[p] for p in self.paths2]]
+        
+        # Calculate cosine similarity
+        sims = np.sum(embs1 * embs2, axis=1)
+        
+        # Final safety check before passing to scikit-learn
+        sims = np.nan_to_num(sims, nan=0.0)
+        sims = np.clip(sims, -1.0, 1.0)
+        
         labels = np.array(self.pair_labels, dtype=int)
 
+        # Compute metrics
         metrics = self._compute_metrics(sims, labels)
         elapsed = time.time() - t0
 
@@ -150,9 +176,9 @@ class VerificationCallback(tf.keras.callbacks.Callback):
         if self.verbose:
             print(
                 f"\n  ┌─ Verification @ epoch {epoch + 1} ({elapsed:.1f}s) ───────────\n"
-                f"  │  AUC:           {metrics['auc']:.4f}\n"
-                f"  │  EER:           {metrics['eer'] * 100:.2f}%\n"
-                f"  │  TAR@FAR=1%:    {metrics['tar_at_far1'] * 100:.2f}%\n"
+                f"  │  AUC:          {metrics['auc']:.4f}\n"
+                f"  │  EER:          {metrics['eer'] * 100:.2f}%\n"
+                f"  │  TAR@FAR=1%:   {metrics['tar_at_far1'] * 100:.2f}%\n"
                 f"  └───────────────────────────────────────────────────────"
             )
 
