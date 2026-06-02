@@ -21,8 +21,13 @@ Key changes for from-scratch training (no pretrained weights):
 import os
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-BASE_DIR = "/content/FaceRecognition"  
-DATA_DIR          = os.path.join(BASE_DIR, "data", "faces")
+# 1. Dynamically find the project root folder directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# 2. Point to your explicit dataset directory (and don't let any other lines overwrite it!)
+DATA_DIR = '/content/FaceRecognition/data'
+
+# 3. Build the remaining system directories based on the project root
 GALLERY_DIR       = os.path.join(BASE_DIR, "data", "gallery")
 CHECKPOINT_DIR    = os.path.join(BASE_DIR, "checkpoints")
 LOG_DIR           = os.path.join(BASE_DIR, "logs")
@@ -31,7 +36,6 @@ OUTPUT_DIR        = os.path.join(BASE_DIR, "outputs")
 BEST_EMBEDDING_MODEL = os.path.join(CHECKPOINT_DIR, "best_embedding_model.keras")
 BEST_TRAIN_MODEL     = os.path.join(CHECKPOINT_DIR, "best_train_model.keras")
 YOLO_WEIGHTS         = os.path.join(CHECKPOINT_DIR, "yolov8n_face.pt")
-
 # ── Image ──────────────────────────────────────────────────────────────────
 IMAGE_SIZE      = (112, 112)     # Standard for ArcFace / face recognition
 EMBEDDING_DIM   = 512
