@@ -169,25 +169,32 @@ class ArcFaceTrainer(tf.keras.Model):
     """
 
     def train_step(self, data):
+        # Unpack the data (images, labels) and the ignored target element
         (images, labels), _ = data
 
         with tf.GradientTape() as tape:
-            logits      = self([images, labels], training=True)
-            loss        = self.compiled_loss(labels, logits)
-            loss       += tf.add_n(self.losses) if self.losses else 0.0
+            # Forward pass: Compute the logits using the backbone and ArcFace layer
+            logits = self([images, labels], training=True)
+            
+            # Keras 3 unified loss calculation (handles base loss + L2 regularization self.losses)
+            loss = self.compute_loss(x=[images, labels], y=labels, y_pred=logits)
+            
+            # Keras 3 mixed precision scaling
+            scaled_loss = self.optimizer.scale_loss(loss)
 
-            is_lso = isinstance(
-                self.optimizer,
-                tf.keras.mixed_precision.LossScaleOptimizer,
-            )
-            scaled_loss = self.optimizer.get_scaled_loss(loss) if is_lso else loss
-
+        # Compute gradients using the scaled loss
         grads = tape.gradient(scaled_loss, self.trainable_variables)
-        if is_lso:
-            grads = self.optimizer.get_unscaled_gradients(grads)
 
+        # Apply gradients (Keras 3 automatically scales gradients down under the hood)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
-        self.compiled_metrics.update_state(labels, logits)
+        
+        # Explicitly update metrics to bypass Keras 3 deprecation warnings
+        for metric in self.metrics:
+            if metric.name == "loss":
+                metric.update_state(loss)
+            else:
+                metric.update_state(labels, logits)
+                
         return {m.name: m.result() for m in self.metrics}
 
     def test_step(self, data):
