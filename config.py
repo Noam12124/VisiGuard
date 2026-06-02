@@ -71,7 +71,7 @@ TOTAL_EPOCHS     = 120    # 120 epochs at ~74 steps/epoch on LFW ≈ 15 min GPU
 
 # Cosine LR schedule parameters
 WARMUP_EPOCHS    = 10     # Linear LR ramp from ~0 to INITIAL_LR
-INITIAL_LR       = 1e-2   # Peak LR after warm-up for from-scratch training
+INITIAL_LR       = 1e-3   # LOWERED from 1e-2 to 1e-3 for stability
 MIN_LR           = 1e-6   # Floor for cosine decay
 
 # Kept for backward compatibility with existing imports
@@ -80,7 +80,7 @@ FINETUNE_LR      = 1e-3
 FINETUNE_EPOCHS  = TOTAL_EPOCHS - WARMUP_EPOCHS
 UNFREEZE_TOP_LAYERS = 0   # Not used in from-scratch training
 
-GRADIENT_CLIP_NORM        = 1.0
+GRADIENT_CLIP_NORM        = 0.5
 EARLY_STOPPING_PATIENCE   = 20   # More patience — from-scratch loss is noisier
 REDUCE_LR_PATIENCE        = 7
 REDUCE_LR_FACTOR          = 0.5

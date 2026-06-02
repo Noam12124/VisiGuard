@@ -173,32 +173,31 @@ def build_model(num_classes: int, training: bool = True):
     # Stage 4: 14×14 → 7×7 × 512
     x = _residual_stage(x, filters=512, num_blocks=2, first_stride=2, stage_name="s4")
 
-    # ── Embedding head ────────────────────────────────────────────────
+# ── Embedding head ────────────────────────────────────────────────
     x = layers.GlobalAveragePooling2D(name="gap")(x)
     x = layers.BatchNormalization(name="bn_gap")(x)
 
-    x = layers.Dense(
-        1024,
-        use_bias           = False,
-        kernel_initializer = "he_normal",
-        kernel_regularizer = regularizers.l2(config.L2_REGULARIZER),
-        name               = "dense_1024",
-    )(x)
+    x = layers.Dense(1024, use_bias=False, kernel_initializer="he_normal", 
+                     kernel_regularizer=regularizers.l2(config.L2_REGULARIZER), name="dense_1024")(x)
     x = layers.BatchNormalization(name="bn_1024")(x)
     x = layers.PReLU(shared_axes=[1], name="prelu_head")(x)
     x = layers.Dropout(config.DROPOUT_RATE, name="dropout")(x)
 
+    # --- REPLACE YOUR OLD CODE WITH THIS SECTION BELOW ---
     x = layers.Dense(
-        config.EMBEDDING_DIM,
-        use_bias           = False,
-        kernel_initializer = "he_normal",
-        kernel_regularizer = regularizers.l2(config.L2_REGULARIZER),
-        name               = "dense_512",
+        config.EMBEDDING_DIM, 
+        use_bias=False, 
+        kernel_initializer="he_normal", 
+        kernel_regularizer=regularizers.l2(config.L2_REGULARIZER), 
+        name="dense_512"
     )(x)
+    
     x = layers.BatchNormalization(name="bn_512")(x)
 
-    # L2-normalise → embeddings lie on the unit hypersphere
-    embedding = layers.UnitNormalization(axis=1, name="embedding")(x)
+    # CRITICAL FIX: The dtype="float32" forces the hypersphere mapping 
+    # to stay in high-precision, preventing NaN values during normalization.
+    embedding = layers.UnitNormalization(axis=1, dtype="float32", name="embedding")(x)
+    # ----------------------------------------------------
 
     # ── Inference model ───────────────────────────────────────────────
     embedding_model = models.Model(
