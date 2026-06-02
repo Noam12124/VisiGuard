@@ -21,7 +21,7 @@ Key changes for from-scratch training (no pretrained weights):
 import os
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-BASE_DIR = "/content/VisiGuard"
+BASE_DIR = "/content/FaceRecognition"  
 DATA_DIR          = os.path.join(BASE_DIR, "data", "faces")
 GALLERY_DIR       = os.path.join(BASE_DIR, "data", "gallery")
 CHECKPOINT_DIR    = os.path.join(BASE_DIR, "checkpoints")
