@@ -369,23 +369,34 @@ def main():
     num_classes = len(class_names)
     print(f"[train] Training on {num_classes} identities.")
     print(f"[train] Verification callback will use {len(val_ids)} val identities.")
+# ── On-the-fly augmentation on the training set ────────────────────────
+    from dataset import RandomOcclusionErasing
 
-    # ── On-the-fly augmentation on the training set ────────────────────────
     data_augmentation = tf.keras.Sequential([
         tf.keras.layers.RandomFlip("horizontal"),
         tf.keras.layers.RandomRotation(0.05),
         tf.keras.layers.RandomContrast(0.15),
         tf.keras.layers.RandomBrightness(0.10),
-    ])
+        RandomOcclusionErasing(p=0.25),
+    ], name="gpu_augmentation")
 
+    # Properly structure train_ds for ArcFaceTrainer: ((images, labels), targets)
     train_ds = train_ds.map(
-        lambda inputs, targets: (
-            (data_augmentation(inputs[0], training=True), inputs[1]),
-            targets,
+        lambda images, labels: (
+            (data_augmentation(images, training=True), labels),
+            labels,
         ),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
+    # Properly structure val_ds to match ArcFaceTrainer's test_step expectation
+    val_ds = val_ds.map(
+        lambda images, labels: (
+            (images, labels),
+            labels,
+        ),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
     # ── Build model ────────────────────────────────────────────────────────
     print("[train] Building FaceResNet from scratch…")
     raw_full_model, embedding_model = build_model(num_classes=num_classes, training=True)

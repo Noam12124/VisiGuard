@@ -101,7 +101,7 @@ class RandomOcclusionErasing(layers.Layer):
         
         return _apply_single(inputs)
     
-    
+
     def get_config(self):
         cfg = super().get_config()
         cfg.update({"p": self.p, "sl": self.sl, "sh": self.sh, "r1": self.r1})
@@ -332,19 +332,16 @@ def build_datasets(data_dir: str = config.DATA_DIR):
     val_paths,   val_labels   = _gather(val_identities)
     test_paths,  test_labels  = _gather(test_identities)
 
-    # ── tf.data pipelines ─────────────────────────────────────────────────
+# ── tf.data pipelines ─────────────────────────────────────────────────
     train_ds = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
     val_ds   = tf.data.Dataset.from_tensor_slices((val_paths,   val_labels))
     test_ds  = tf.data.Dataset.from_tensor_slices((test_paths,  test_labels))
-
-    aug = get_augmentation_pipeline()
 
     train_ds = (
         train_ds
         .shuffle(buffer_size=len(train_paths), seed=config.RANDOM_SEED)
         .map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
-        .batch(config.BATCH_SIZE)  # 1. Group into 4D batches first
-        .map(lambda x, y: (aug(x, training=True), y), num_parallel_calls=tf.data.AUTOTUNE) # 2. Augment the batch
+        .batch(config.BATCH_SIZE, drop_remainder=True)
         .prefetch(tf.data.AUTOTUNE)
     )
     val_ds  = (val_ds
