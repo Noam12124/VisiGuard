@@ -213,7 +213,30 @@ def build_class_catalogue(data_dir: str = None):
     class_to_idx = {name: i for i, name in enumerate(class_names)}
     return class_names, class_to_idx
 
+# ── Augmentation pipeline ──────────────────────────────────────────────────
 
+def get_augmentation_pipeline():
+    """On-the-fly augmentation built from config parameters."""
+    return tf.keras.Sequential([
+        layers.RandomFlip("horizontal") if config.AUGMENT_FLIP else layers.Layer(),
+        layers.RandomRotation(factor=config.AUGMENT_ROTATION / 360.0, fill_mode="constant"),
+        layers.RandomZoom(height_factor=config.AUGMENT_ZOOM, width_factor=config.AUGMENT_ZOOM,
+                          fill_mode="constant"),
+        layers.RandomBrightness(factor=config.AUGMENT_BRIGHTNESS),
+        layers.RandomContrast(factor=config.AUGMENT_CONTRAST),
+        RandomOcclusionErasing(p=0.25),
+    ], name="data_augmentation")
+
+
+# ── Image parse function ───────────────────────────────────────────────────
+
+def _parse_function(filename, label):
+    """Read → decode JPEG → resize → normalise to [0, 1]."""
+    raw   = tf.io.read_file(filename)
+    image = tf.image.decode_jpeg(raw, channels=config.NUM_CHANNELS)
+    image = tf.image.resize(image, config.IMAGE_SIZE)
+    image = tf.cast(image, tf.float32) / 255.0
+    return image, label
 # ── Dataset builder ────────────────────────────────────────────────────────
 
 def build_datasets(data_dir: str = config.DATA_DIR):
