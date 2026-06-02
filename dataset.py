@@ -58,46 +58,50 @@ class RandomOcclusionErasing(layers.Layer):
         if not training:
             return inputs
 
-        # Safely capture structural shapes from single 3D image: (Height, Width, Channels)
-        h = tf.shape(inputs)[0]  
-        w = tf.shape(inputs)[1]  
-        c = tf.shape(inputs)[2]  
-        img_dtype = inputs.dtype
+        # 1. Wrap your exact block into a single-image function
+        def _apply_single(img):
+            # Change 'inputs' to 'img' for your shape extractions
+            h = tf.shape(img)[0]  
+            w = tf.shape(img)[1]  
+            c = tf.shape(img)[2]  
+            img_dtype = img.dtype
 
-        def apply_erasing():
-            # Calculate bounding box sizes for erasing patch
-            img_area    = tf.cast(h * w, tf.float32)
-            target_area = tf.random.uniform([], self.sl, self.sh) * img_area
-            aspect      = tf.random.uniform([], self.r1, 1.0 / self.r1)
+            def apply_erasing():
+                img_area    = tf.cast(h * w, tf.float32)
+                target_area = tf.random.uniform([], self.sl, self.sh) * img_area
+                aspect      = tf.random.uniform([], self.r1, 1.0 / self.r1)
 
-            cut_h = tf.cast(tf.math.round(tf.math.sqrt(target_area * aspect)),     tf.int32)
-            cut_w = tf.cast(tf.math.round(tf.math.sqrt(target_area / aspect)),     tf.int32)
-            cut_h = tf.maximum(tf.minimum(cut_h, h - 1), 2)
-            cut_w = tf.maximum(tf.minimum(cut_w, w - 1), 2)
+                cut_h = tf.cast(tf.math.round(tf.math.sqrt(target_area * aspect)),     tf.int32)
+                cut_w = tf.cast(tf.math.round(tf.math.sqrt(target_area / aspect)),     tf.int32)
+                cut_h = tf.maximum(tf.minimum(cut_h, h - 1), 2)
+                cut_w = tf.maximum(tf.minimum(cut_w, w - 1), 2)
 
-            # Coordinate positioning
-            h1 = tf.cast(tf.random.uniform([], 0, tf.cast(h - cut_h, tf.float32)), tf.int32)
-            w1 = tf.cast(tf.random.uniform([], 0, tf.cast(w - cut_w, tf.float32)), tf.int32)
+                h1 = tf.cast(tf.random.uniform([], 0, tf.cast(h - cut_h, tf.float32)), tf.int32)
+                w1 = tf.cast(tf.random.uniform([], 0, tf.cast(w - cut_w, tf.float32)), tf.int32)
 
-            # Generate noise matching the patch dimension and input dtype
-            noise = tf.random.uniform(tf.stack([cut_h, cut_w, c]), 0.0, 1.0, dtype=img_dtype)
+                noise = tf.random.uniform(tf.stack([cut_h, cut_w, c]), 0.0, 1.0, dtype=img_dtype)
 
-            # Construct pads and merge
-            pad = [[h1, h - h1 - cut_h], [w1, w - w1 - cut_w], [0, 0]]
-            mask  = tf.pad(tf.zeros([cut_h, cut_w, c], dtype=img_dtype), pad,
-                           constant_values=tf.cast(1.0, img_dtype))
-            patch = tf.pad(noise, pad, constant_values=tf.cast(0.0, img_dtype))
-            
-            return inputs * mask + patch * (tf.cast(1.0, img_dtype) - mask)
+                pad = [[h1, h - h1 - cut_h], [w1, w - w1 - cut_w], [0, 0]]
+                mask  = tf.pad(tf.zeros([cut_h, cut_w, c], dtype=img_dtype), pad,
+                               constant_values=tf.cast(1.0, img_dtype))
+                patch = tf.pad(noise, pad, constant_values=tf.cast(0.0, img_dtype))
+                
+                # Change 'inputs' to 'img' here as well
+                return img * mask + patch * (tf.cast(1.0, img_dtype) - mask)
 
-        # Graph-safe evaluation using tf.cond
-        # If the uniform random number is greater than p, skip erasing and return inputs untouched
-        return tf.cond(
-            tf.random.uniform([]) > self.p,
-            lambda: inputs,
-            apply_erasing
-        )
+            return tf.cond(
+                tf.random.uniform([]) > self.p,
+                lambda: img, # Change 'inputs' to 'img'
+                apply_erasing
+            )
 
+        # 2. Add this conditional block at the bottom of call() to handle 3D or 4D
+        if inputs.shape.ndims == 4:
+            return tf.map_fn(_apply_single, inputs, fn_output_signature=inputs.dtype)
+        
+        return _apply_single(inputs)
+    
+    
     def get_config(self):
         cfg = super().get_config()
         cfg.update({"p": self.p, "sl": self.sl, "sh": self.sh, "r1": self.r1})
@@ -339,11 +343,8 @@ def build_datasets(data_dir: str = config.DATA_DIR):
         train_ds
         .shuffle(buffer_size=len(train_paths), seed=config.RANDOM_SEED)
         .map(_parse_function, num_parallel_calls=tf.data.AUTOTUNE)
-        # 1. Map augmentation FIRST to individual 3D images (112, 112, 3)
-        .map(lambda x, y: (aug(x, training=True), y),
-             num_parallel_calls=tf.data.AUTOTUNE)
-        # 2. Batch the fully processed images into 4D tensors LAST
-        .batch(config.BATCH_SIZE)
+        .batch(config.BATCH_SIZE)  # 1. Group into 4D batches first
+        .map(lambda x, y: (aug(x, training=True), y), num_parallel_calls=tf.data.AUTOTUNE) # 2. Augment the batch
         .prefetch(tf.data.AUTOTUNE)
     )
     val_ds  = (val_ds
