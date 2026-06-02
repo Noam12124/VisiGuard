@@ -51,55 +51,69 @@ from utils import (
 # VerificationCallback — pairwise AUC/EER monitor
 # ─────────────────────────────────────────────────────────────────────────────
 
-def on_epoch_end(self, epoch: int, logs: dict = None):
+# ─────────────────────────────────────────────────────────────────────────────
+# VerificationCallback — pairwise AUC/EER monitor
+# ─────────────────────────────────────────────────────────────────────────────
+
+class VerificationCallback(tf.keras.callbacks.Callback):
+    def __init__(self, embedding_model, data_dir, val_ids, 
+                 pairs_per_identity=15, embed_batch_size=64, run_every_n_epochs=1, verbose=True):
+        super().__init__()
+        self.embedding_model = embedding_model
+        self.run_every_n_epochs = run_every_n_epochs
+        self.verbose = verbose
+        
+        # Prepare verification data
+        self.paths1, self.paths2, self.pair_labels = build_verification_pairs(
+            data_dir=data_dir, identities=val_ids, pairs_per_identity=pairs_per_identity
+        )
+        self.all_paths = list(dict.fromkeys(self.paths1 + self.paths2))
+        self._path_to_idx = {p: i for i, p in enumerate(self.all_paths)}
+        self.embed_batch_size = embed_batch_size
+
+    def _extract_all_embeddings(self):
+        from utils import load_image_for_inference
+        all_embs = []
+        for i in range(0, len(self.all_paths), self.embed_batch_size):
+            batch_paths = self.all_paths[i:i + self.embed_batch_size]
+            imgs = np.stack([load_image_for_inference(p) for p in batch_paths])
+            all_embs.append(self.embedding_model.predict(imgs, verbose=0))
+        return np.concatenate(all_embs, axis=0)
+
+    def _compute_metrics(self, sims, labels):
+        from evaluate import compute_verification_metrics
+        # Use a temporary directory for metrics to avoid clutter
+        metrics = compute_verification_metrics(sims, labels, save_dir=os.path.join(config.OUTPUT_DIR, "temp"))
+        return {
+            "auc": metrics["auc"],
+            "eer": metrics["eer"],
+            "tar_at_far1": metrics["tar_at_far"].get("TAR@FAR=0.01", 0.0)
+        }
+
+    def on_epoch_end(self, epoch: int, logs: dict = None):
         if logs is None:
             logs = {}
-            
-        # CRITICAL FIX: Ensure keys exist even if we skip the calculation.
-        # This prevents the KeyError in ModelCheckpoint.
         logs.setdefault("val_ver_auc", 0.0)
         logs.setdefault("val_ver_eer", 1.0)
         logs.setdefault("val_ver_tar1pct", 0.0)
 
-        # Skip heavy calculation if not the right epoch
         if (epoch + 1) % self.run_every_n_epochs != 0:
             return
 
-        t0 = time.time()
-        
-        # 1. Extract raw embeddings
         all_embs = self._extract_all_embeddings()
-
-        # 2. Safety: Normalize and handle NaNs
-        all_embs = all_embs.astype(np.float32)
-        all_embs = np.nan_to_num(all_embs, nan=0.0, posinf=1.0, neginf=-1.0)
+        all_embs = np.nan_to_num(all_embs.astype(np.float32), nan=0.0)
         norms = np.linalg.norm(all_embs, axis=1, keepdims=True)
         all_embs = all_embs / np.maximum(norms, 1e-8)
         
-        # 3. Calculate similarity
         embs1 = all_embs[[self._path_to_idx[p] for p in self.paths1]]
         embs2 = all_embs[[self._path_to_idx[p] for p in self.paths2]]
-        sims = np.sum(embs1 * embs2, axis=1)
-        sims = np.nan_to_num(sims, nan=0.0)
-        sims = np.clip(sims, -1.0, 1.0)
+        sims = np.clip(np.sum(embs1 * embs2, axis=1), -1.0, 1.0)
         
-        # 4. Compute metrics
         metrics = self._compute_metrics(sims, np.array(self.pair_labels, dtype=int))
-        elapsed = time.time() - t0
 
-        # 5. Update logs
         logs["val_ver_auc"]     = metrics["auc"]
         logs["val_ver_eer"]     = metrics["eer"]
         logs["val_ver_tar1pct"] = metrics["tar_at_far1"]
-
-        if self.verbose:
-            print(
-                f"\n  ┌─ Verification @ epoch {epoch + 1} ({elapsed:.1f}s) ───────────\n"
-                f"  │  AUC:          {metrics['auc']:.4f}\n"
-                f"  │  EER:          {metrics['eer'] * 100:.2f}%\n"
-                f"  │  TAR@FAR=1%:   {metrics['tar_at_far1'] * 100:.2f}%\n"
-                f"  └───────────────────────────────────────────────────────"
-            )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ArcFace training wrapper
