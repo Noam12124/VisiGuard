@@ -51,84 +51,18 @@ from utils import (
 # VerificationCallback — pairwise AUC/EER monitor
 # ─────────────────────────────────────────────────────────────────────────────
 
-class VerificationCallback(tf.keras.callbacks.Callback):
-    """
-    End-of-epoch pairwise verification evaluator.
-
-    Computes AUC, EER, and TAR@FAR=1% on held-out validation identity pairs
-    so we can track real-world verification performance, not just classification
-    accuracy on training classes.
-    """
-
-    def __init__(
-        self,
-        embedding_model:    tf.keras.Model,
-        data_dir:           str,
-        val_ids:            list,
-        pairs_per_identity: int = 15,
-        embed_batch_size:   int = 64,
-        run_every_n_epochs: int = 1,
-        verbose:            bool = True,
-    ):
-        super().__init__()
-        self.embedding_model    = embedding_model
-        self.data_dir           = data_dir
-        self.val_ids            = val_ids
-        self.embed_batch_size   = embed_batch_size
-        self.run_every_n_epochs = run_every_n_epochs
-        self.verbose            = verbose
-
-        # Pre-build pairs once
-        self.paths1, self.paths2, self.pair_labels = build_verification_pairs(
-            data_dir   = config.DATA_DIR,
-            identities = val_ids,
-            num_pairs  = config.NUM_VERIFICATION_PAIRS,
-        )
-
-        self._unique_paths = list(dict.fromkeys(self.paths1 + self.paths2))
-        self._path_to_idx  = {p: i for i, p in enumerate(self._unique_paths)}
-
-        print(
-            f"[VerificationCallback] Ready: {len(self.pair_labels):,} pairs, "
-            f"{len(self._unique_paths):,} unique images."
-        )
-
-    def _load_image(self, path: str) -> np.ndarray:
-        img_bgr = cv2.imread(path)
-        if img_bgr is None:
-            return np.zeros((*config.IMAGE_SIZE, 3), dtype=np.float32)
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        img_rgb = cv2.resize(img_rgb, (config.IMAGE_SIZE[1], config.IMAGE_SIZE[0]),
-                             interpolation=cv2.INTER_CUBIC)
-        return img_rgb.astype(np.float32)
-
-    def _extract_all_embeddings(self) -> np.ndarray:
-        all_embs = []
-        bs       = self.embed_batch_size
-        for start in range(0, len(self._unique_paths), bs):
-            batch = np.stack(
-                [self._load_image(p) for p in self._unique_paths[start:start + bs]],
-                axis=0,
-            )
-            embs = self.embedding_model.predict(batch, verbose=0)
-            norms = np.linalg.norm(embs, axis=1, keepdims=True)
-            all_embs.append((embs / np.maximum(norms, 1e-8)).astype(np.float32))
-        return np.concatenate(all_embs, axis=0)
-
-    def _compute_metrics(self, sims: np.ndarray, labels: np.ndarray) -> dict:
-        auc_val = float(roc_auc_score(labels, sims))
-        fpr, tpr, _ = roc_curve(labels, sims, pos_label=1)
-        fnr         = 1.0 - tpr
-        eer_idx     = int(np.argmin(np.abs(fpr - fnr)))
-        eer         = float((fpr[eer_idx] + fnr[eer_idx]) / 2.0)
-        mask        = fpr <= 0.01
-        tar_1pct    = float(tpr[mask][-1]) if mask.any() else 0.0
-        return {"auc": auc_val, "eer": eer, "tar_at_far1": tar_1pct}
-
 def on_epoch_end(self, epoch: int, logs: dict = None):
+        if logs is None:
+            logs = {}
+            
+        # CRITICAL FIX: Ensure keys exist even if we skip the calculation.
+        # This prevents the KeyError in ModelCheckpoint.
+        logs.setdefault("val_ver_auc", 0.0)
+        logs.setdefault("val_ver_eer", 1.0)
+        logs.setdefault("val_ver_tar1pct", 0.0)
+
+        # Skip heavy calculation if not the right epoch
         if (epoch + 1) % self.run_every_n_epochs != 0:
-            if logs is not None:
-                logs["val_ver_auc"] = logs.get("val_ver_auc", 0.0)
             return
 
         t0 = time.time()
@@ -136,42 +70,27 @@ def on_epoch_end(self, epoch: int, logs: dict = None):
         # 1. Extract raw embeddings
         all_embs = self._extract_all_embeddings()
 
-        # ── CRITICAL FIX: The "NaN" Shield ────────────────────────────────
-        # Force cast to float32 immediately
+        # 2. Safety: Normalize and handle NaNs
         all_embs = all_embs.astype(np.float32)
-        
-        # Replace Infs/NaNs with 0.0 before doing any math
         all_embs = np.nan_to_num(all_embs, nan=0.0, posinf=1.0, neginf=-1.0)
-        
-        # Normalize: Add epsilon 1e-8 to avoid division by zero
         norms = np.linalg.norm(all_embs, axis=1, keepdims=True)
         all_embs = all_embs / np.maximum(norms, 1e-8)
         
-        # Ensure the normalization itself didn't create new NaNs
-        all_embs = np.nan_to_num(all_embs, nan=0.0)
-        # ──────────────────────────────────────────────────────────────────
-
-        # Extract pairs
+        # 3. Calculate similarity
         embs1 = all_embs[[self._path_to_idx[p] for p in self.paths1]]
         embs2 = all_embs[[self._path_to_idx[p] for p in self.paths2]]
-        
-        # Calculate cosine similarity
         sims = np.sum(embs1 * embs2, axis=1)
-        
-        # Final safety check before passing to scikit-learn
         sims = np.nan_to_num(sims, nan=0.0)
         sims = np.clip(sims, -1.0, 1.0)
         
-        labels = np.array(self.pair_labels, dtype=int)
-
-        # Compute metrics
-        metrics = self._compute_metrics(sims, labels)
+        # 4. Compute metrics
+        metrics = self._compute_metrics(sims, np.array(self.pair_labels, dtype=int))
         elapsed = time.time() - t0
 
-        if logs is not None:
-            logs["val_ver_auc"]     = metrics["auc"]
-            logs["val_ver_eer"]     = metrics["eer"]
-            logs["val_ver_tar1pct"] = metrics["tar_at_far1"]
+        # 5. Update logs
+        logs["val_ver_auc"]     = metrics["auc"]
+        logs["val_ver_eer"]     = metrics["eer"]
+        logs["val_ver_tar1pct"] = metrics["tar_at_far1"]
 
         if self.verbose:
             print(
@@ -181,7 +100,6 @@ def on_epoch_end(self, epoch: int, logs: dict = None):
                 f"  │  TAR@FAR=1%:   {metrics['tar_at_far1'] * 100:.2f}%\n"
                 f"  └───────────────────────────────────────────────────────"
             )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ArcFace training wrapper
@@ -251,6 +169,7 @@ def _build_callbacks(
     )
 
     return [
+        # 1. Verification MUST be first to populate the logs dictionary.
         VerificationCallback(
             embedding_model    = embedding_model,
             data_dir           = data_dir,
@@ -260,6 +179,7 @@ def _build_callbacks(
             run_every_n_epochs = 1,
         ),
 
+        # 2. Best Model Checkpoint
         tf.keras.callbacks.ModelCheckpoint(
             filepath          = config.BEST_TRAIN_MODEL,
             monitor           = "val_ver_auc",
@@ -269,14 +189,18 @@ def _build_callbacks(
             verbose           = 1,
         ),
 
+        # 3. Epoch-specific Checkpoint
         tf.keras.callbacks.ModelCheckpoint(
             filepath          = ckpt_path,
+            monitor           = "val_ver_auc", # Explicitly monitor the key
+            mode              = "max",
             save_best_only    = False,
             save_weights_only = True,
             verbose           = 0,
             save_freq         = "epoch",
         ),
 
+        # 4. Early Stopping
         tf.keras.callbacks.EarlyStopping(
             monitor              = "val_ver_auc",
             mode                 = "max",
@@ -285,6 +209,7 @@ def _build_callbacks(
             verbose              = 1,
         ),
 
+        # 5. LR Reduction
         tf.keras.callbacks.ReduceLROnPlateau(
             monitor  = "val_loss",
             factor   = config.REDUCE_LR_FACTOR,
@@ -293,8 +218,10 @@ def _build_callbacks(
             verbose  = 1,
         ),
 
+        # 6. LR Scheduler
         tf.keras.callbacks.LearningRateScheduler(lr_schedule, verbose=0),
 
+        # 7. Monitoring
         tf.keras.callbacks.TensorBoard(
             log_dir        = os.path.join(config.LOG_DIR, "training"),
             histogram_freq = 0,
@@ -307,18 +234,16 @@ def _build_callbacks(
         ),
     ]
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Main training function (single phase)
 # ─────────────────────────────────────────────────────────────────────────────
-
 def train(
     full_model,
     embedding_model,
     train_ds,
     val_ds,
-    data_dir:      str,
-    val_ids:       list,
+    data_dir:       str,
+    val_ids:        list,
     initial_epoch: int = 0,
 ) -> tf.keras.callbacks.History:
     print("\n" + "=" * 60)
