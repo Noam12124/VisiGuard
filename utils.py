@@ -84,19 +84,23 @@ def setup_mixed_precision() -> bool:
 # ── Image loading ─────────────────────────────────────────────────────────
 
 def load_image_for_inference(path: str) -> np.ndarray:
-    """
-    Load an image from disk and resize to (H, W, 3) float32 [0, 255].
-    Does NOT detect or align — use for pre-cropped face images.
-
-    Returns (112, 112, 3) float32 array (RGB).
-    """
     img_bgr = cv2.imread(path)
     if img_bgr is None:
         raise ValueError(f"Could not read image: {path}")
+    
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     img_rgb = cv2.resize(img_rgb, (config.IMAGE_SIZE[1], config.IMAGE_SIZE[0]),
                          interpolation=cv2.INTER_CUBIC)
-    return img_rgb.astype(np.float32)
+    
+    # Convert to float32
+    img_float = img_rgb.astype(np.float32)
+    
+    # Optional sanity check: If the values are already [0, 1] (maybe from another source),
+    # this will warn you that you are about to feed the model [0, 1] instead of [0, 255]
+    if img_float.max() <= 1.0:
+        print(f"Warning: {path} looks normalized [0, 1]. Training expects [0, 255].")
+        
+    return img_float
 
 
 def bgr_to_model_input(face_crop_bgr: np.ndarray) -> np.ndarray:

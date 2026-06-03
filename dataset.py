@@ -242,14 +242,15 @@ def get_augmentation_pipeline():
 
 
 # ── Image parse function ───────────────────────────────────────────────────
-
 def _parse_function(filename, label):
-    """Read → decode JPEG → resize → normalise to [0, 1]."""
+    """Read → decode JPEG → resize → return raw pixels [0, 255]."""
     raw   = tf.io.read_file(filename)
+    # Ensure channels matches your model input (usually 3)
     image = tf.image.decode_jpeg(raw, channels=config.NUM_CHANNELS)
     image = tf.image.resize(image, config.IMAGE_SIZE)
-    image = tf.cast(image, tf.float32) / 255.0
-    return image, label
+    
+    # Just cast to float32; do NOT divide by 255.0
+    return tf.cast(image, tf.float32), label
 # ── Dataset builder ────────────────────────────────────────────────────────
 
 def build_datasets(data_dir: str = config.DATA_DIR):
@@ -323,14 +324,18 @@ def build_datasets(data_dir: str = config.DATA_DIR):
     def _gather(identity_list, is_train=False):
         paths, labels = [], []
         for ident in identity_list:
+            # If it's training data, use the real label. 
+            # If it's validation/test, use 0 (a valid index in the model).
+            label = train_id_to_label[ident] if is_train else 0
+            
             for img_path in identity_to_images[ident]:
                 paths.append(img_path)
-                labels.append(train_id_to_label[ident] if is_train else -1)
+                labels.append(label)
         return paths, labels
 
     train_paths, train_labels = _gather(train_identities, is_train=True)
-    val_paths,   val_labels   = _gather(val_identities)
-    test_paths,  test_labels  = _gather(test_identities)
+    val_paths,   val_labels   = _gather(val_identities,   is_train=False)
+    test_paths,  test_labels  = _gather(test_identities,  is_train=False)
 
 # ── tf.data pipelines ─────────────────────────────────────────────────
     train_ds = tf.data.Dataset.from_tensor_slices((train_paths, train_labels))
