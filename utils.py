@@ -280,15 +280,23 @@ def plot_training_history(
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # Accuracy
-    ax2.plot(epochs, all_acc,     label="Train accuracy",  lw=2)
-    ax2.plot(epochs, all_val_acc, label="Val accuracy",    lw=2, linestyle="--")
+# ── Accuracy ──────────────────────────────────────────────────────────
+    # ONLY plot accuracy if we actually have data, to prevent a crash
+    if len(all_acc) > 0:
+        ax2.plot(epochs, all_acc, label="Train accuracy", lw=2)
+    
+    if len(all_val_acc) > 0:
+        ax2.plot(epochs, all_val_acc, label="Val accuracy", lw=2, linestyle="--")
+    
+    # If no data exists, leave the plot empty or add a label
+    if len(all_acc) == 0 and len(all_val_acc) == 0:
+        ax2.text(0.5, 0.5, "No Accuracy Data", 
+                 horizontalalignment='center', verticalalignment='center', 
+                 transform=ax2.transAxes)
+
     ax2.set_xlabel("Epoch")
     ax2.set_ylabel("Accuracy")
     ax2.set_title("Classification Accuracy")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    ax2.set_ylim([0, 1])
 
     # Mark phase boundary
     if len(phase_splits) == 3:
