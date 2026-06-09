@@ -1,275 +1,549 @@
-# 🔍 Face Recognition CNN — Production-Level Project
+# 🔍 VisiGuard — מערכת אבטחה חכמה עם זיהוי פנים בזמן אמת
 
-A complete, production-quality face recognition system using:
+<div align="center">
 
-| Component | Choice | Why |
-|-----------|--------|-----|
-| **Backbone** | ResNet50V2 (ImageNet pretrained) | Proven for face recognition; stable gradient flow |
-| **Loss** | ArcFace (Additive Angular Margin) | Tighter identity clusters → better generalisation |
-| **Detector** | YOLOv8-face | State-of-the-art real-time face detection |
-| **Framework** | TensorFlow / Keras | Mature ecosystem; easy GPU support |
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
+![TensorFlow](https://img.shields.io/badge/TensorFlow-2.x-FF6F00?style=flat-square&logo=tensorflow&logoColor=white)
+![React](https://img.shields.io/badge/React-18+-61DAFB?style=flat-square&logo=react&logoColor=black)
+![YOLOv8](https://img.shields.io/badge/YOLOv8-Face-00FFAA?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
----
+**מערכת אבטחה ביתית אקטיבית המזהה פנים בזמן אמת, מבדילה בין אנשים מורשים ולא מוכרים, ומתריעה מיידית למשתמש.**
 
-## 📁 Project Structure
-
-```
-face_recognition_project/
-├── config.py          ← All hyperparameters in one place
-├── model.py           ← CNN architecture (backbone + ArcFace head)
-├── arcface.py         ← ArcFace loss layer
-├── dataset.py         ← tf.data pipeline with augmentation
-├── detector.py        ← YOLOv8 face detector wrapper
-├── train.py           ← Training script (2-phase)
-├── inference.py       ← Compare faces / webcam / gallery lookup
-├── utils.py           ← Helpers: plotting, cosine similarity, etc.
-├── download_lfw.py    ← One-command dataset download
-├── requirements.txt
-├── README.md
-├── checkpoints/       ← Model weights saved here
-├── logs/              ← TensorBoard logs
-├── data/
-│   └── faces/         ← Training images (one folder per person)
-├── outputs/           ← Training curves, result images
-└── notebooks/
-    └── training_demo.ipynb
-```
+</div>
 
 ---
 
-## ⚡ Quick Start
+## תוכן עניינים
 
-### 1. Install dependencies
-
-```bash
-# (Recommended) Create a virtual environment first
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-
-pip install -r requirements.txt
-```
-
-> **GPU users:** Make sure CUDA ≥ 11.2 and cuDNN ≥ 8.1 are installed.
-> TensorFlow will detect the GPU automatically.
-
----
-
-### 2. Download the dataset
-
-#### Option A – LFW (automatic, recommended for beginners)
-
-```bash
-python download_lfw.py
-```
-
-This downloads the Labeled Faces in the Wild dataset (~180 MB), filters it
-to identities with ≥5 images, and places everything under `data/faces/`.
-
-**Result:** ~1,680 identities · ~10,000 images — ready to train.
-
-#### Option B – Your own dataset
-
-Create sub-folders under `data/faces/`, one per person:
-
-```
-data/faces/
-    Alice_Smith/
-        001.jpg
-        002.jpg
-        003.jpg
-    Bob_Jones/
-        001.jpg
-        002.jpg
-        ...
-```
-
-Each person must have at least **5 images** (configurable via `config.py`).
-
-#### Option C – VGGFace2 (production-scale, 85%+ accuracy)
-
-VGGFace2 has 3.3M images of 9,131 identities.
-
-1. Request access at <https://github.com/ox-vgg/vgg_face2>
-2. Download and organise as `data/faces/<identity>/<image.jpg>`
-3. Run `python train.py`
+- [מה זה VisiGuard?](#מה-זה-visiguard)
+- [ארכיטקטורת המערכת](#ארכיטקטורת-המערכת)
+- [זרימת הנתונים](#זרימת-הנתונים)
+- [מודל ה-AI](#מודל-ה-ai)
+- [ה-API / Backend](#ה-api--backend)
+- [ממשק המשתמש Frontend](#ממשק-המשתמש-frontend)
+- [Dataset](#dataset)
+- [מדדי ביצועים](#מדדי-ביצועים)
+- [התקנה והרצה](#התקנה-והרצה)
+- [מבנה הפרויקט](#מבנה-הפרויקט)
+- [אימון מחדש של המודל](#אימון-מחדש-של-המודל)
 
 ---
 
-### 3. Train the model
+## מה זה VisiGuard?
 
-```bash
-# Standard training
-python train.py
+רוב מצלמות האבטחה הביתיות מגיבות **אחרי** שמשהו קורה — הן מקליטות אך לא מבינות. VisiGuard לוקחת גישה שונה: **ניתוח בזמן אמת** של כל מי שמופיע בשדה הראייה של המצלמה.
 
-# Resume from a previous run
-python train.py --resume
+**כיצד זה עובד:**
+- מצלמה ממוקמת בנקודה אסטרטגית (כניסה לבית, שער, מסדרון)
+- כל פריים מנותח על ידי YOLOv8 לזיהוי נוכחות אנושית
+- אם מזוהה אדם — פניו מחולצות ומועברות למודל ה-CNN המאומן
+- המודל משווה את ה-Embedding של הפנים מול גלריית האנשים המורשים
+- אם האדם מזוהה — האירוע נרשם בשקט
+- אם האדם **לא מזוהה** — מתריאה Push מיידית נשלחת לטלפון
 
-# Override batch size (e.g., if GPU runs out of memory)
-python train.py --batch-size 16
+---
+
+## ארכיטקטורת המערכת
+
 ```
-
-**Training has two phases:**
-
-| Phase | Epochs | Backbone | LR | Purpose |
-|-------|--------|----------|----|---------|
-| Warm-up | 15 | Frozen | 1e-3 | Train head from scratch |
-| Fine-tune | 35 | Top 50 layers unfrozen | 1e-4 → 1e-7 (cosine) | Adapt backbone |
-
-**Watch training in TensorBoard:**
-
-```bash
-tensorboard --logdir logs/
-# Open http://localhost:6006
+┌─────────────────────────────────────────────────────────────────┐
+│                        VISIGUARD PIPELINE                       │
+│                                                                 │
+│  📷 Camera Feed                                                 │
+│       │                                                         │
+│       ▼                                                         │
+│  ┌─────────────┐    לא נמצא אדם    ┌──────────────┐            │
+│  │  YOLOv8     │ ─────────────────► │  המשך ניטור  │            │
+│  │ Person Det. │                    └──────────────┘            │
+│  └──────┬──────┘                                                │
+│         │ נמצא אדם                                              │
+│         ▼                                                       │
+│  ┌─────────────┐                                                │
+│  │  FaceAligner│  ← YOLOv8 5-point keypoints (eyes, nose, ...)  │
+│  │ (eye warp)  │                                                │
+│  └──────┬──────┘                                                │
+│         ▼                                                       │
+│  ┌─────────────────────────────┐                                │
+│  │         FaceResNet          │                                │
+│  │   CNN trained from scratch  │                                │
+│  │   512-d L2 embedding        │                                │
+│  └──────────────┬──────────────┘                                │
+│                 ▼                                               │
+│  ┌──────────────────────────────┐                               │
+│  │       Decision Engine        │                               │
+│  │  cosine_sim ≥ 0.55 → מורשה  │                               │
+│  │  cosine_sim < 0.55 → לא מוכר│                               │
+│  └──────┬───────────────┬───────┘                               │
+│         │               │                                       │
+│         ▼               ▼                                       │
+│    ✅ רישום         🚨 התראה                                    │
+│    שקט             Push Notification                            │
+│                    + שמירת אירוע ב-DB                           │
+│                         │                                       │
+│                         ▼                                       │
+│                  ┌─────────────┐                                │
+│                  │  React App  │  Dashboard / Alerts / Gallery  │
+│                  └─────────────┘                                │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### 4. Run inference
-
-#### Compare two face images
-
-```bash
-python inference.py --mode compare --img1 alice.jpg --img2 bob.jpg
-```
+## זרימת הנתונים
 
 ```
-─── Face Comparison Result ─────────────────────────
-  similarity     : 0.7832
-  same_person    : True
-  verdict        : Same Person ✓
-  confidence     : 89.2%
-  threshold      : 0.55
-────────────────────────────────────────────────────
-```
-
-#### Identify faces in a photo
-
-```bash
-python inference.py \
-  --mode identify \
-  --img group_photo.jpg \
-  --gallery data/gallery/ \
-  --output outputs/result.jpg
-```
-
-#### Live webcam recognition (press Q to quit)
-
-```bash
-python inference.py --mode webcam --gallery data/gallery/
+[Camera] ──► [YOLOv8 Detect] ──► [FaceAligner] ──► [FaceResNet CNN]
+                                                          │
+                                                    512-d Embedding
+                                                          │
+                                              ┌───────────▼────────────┐
+                                              │   Cosine Similarity     │
+                                              │   vs. Gallery DB        │
+                                              └───────────┬────────────┘
+                                                          │
+                                            ┌─────────────┴──────────────┐
+                                            │                            │
+                                      sim ≥ 0.55                  sim < 0.55
+                                            │                            │
+                                      ✅ Authorized              ❌ Unknown
+                                       → Log Event            → Push Alert
+                                                               → Save to DB
 ```
 
 ---
 
-## 🎛️ Hyperparameters (config.py)
+## מודל ה-AI
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `IMAGE_SIZE` | `(112, 112)` | Input resolution (standard for face recognition) |
-| `EMBEDDING_DIM` | `512` | Face embedding vector size |
-| `DROPOUT_RATE` | `0.4` | Dropout in the bottleneck head |
-| `ARCFACE_MARGIN` | `0.5` | Angular margin ≈ 28.6° (ArcFace paper default) |
-| `ARCFACE_SCALE` | `64.0` | Feature scale / temperature |
-| `BATCH_SIZE` | `32` | Training batch size |
-| `WARMUP_EPOCHS` | `15` | Phase 1 epochs (backbone frozen) |
-| `FINETUNE_EPOCHS` | `35` | Phase 2 epochs (top layers unfrozen) |
-| `SAME_PERSON_THRESHOLD` | `0.55` | Cosine similarity cutoff for matching |
-| `FACE_CONF_THRESHOLD` | `0.50` | YOLOv8 minimum face detection confidence |
-| `MIXED_PRECISION` | `True` | float16 training (GPU only, 2× speedup) |
+### FaceResNet — רשת מותאמת לפנים, מאומנת מאפס
 
----
+המודל **לא** מבוסס על מודל מאומן-מראש (ImageNet, EfficientNet וכד'). הוא תוכנן ואומן מאפס ספציפית למשימת זיהוי פנים.
 
-## 📊 Expected Accuracy
-
-| Dataset | Identities | Validation Accuracy |
-|---------|-----------|---------------------|
-| LFW (≥5 imgs/person) | ~1,680 | **85 – 92%** |
-| CASIA-WebFace | 10,575 | **90 – 95%** |
-| VGGFace2 | 9,131 | **93 – 97%** |
-
-> Validation accuracy here measures **classification** on the training identities.
-> For **1:1 face verification** (same/different person test), the similarity
-> threshold controls precision vs recall.
-
----
-
-## 🏗️ Architecture Deep-Dive
+#### ארכיטקטורת הרשת
 
 ```
 Input (112 × 112 × 3)
     │
     ▼
-ResNet50V2  [ImageNet pretrained — 25M params]
-    │   ↑ Phase 1: frozen
-    │   ↑ Phase 2: top 50 layers trainable
-    ▼
-GlobalAveragePooling2D   → (2048,)
-BatchNormalization
+Stem:    Conv(64, 3×3, stride=2) → BN → PReLU       → 56×56×64
     │
     ▼
-Dense(1024, no_bias)
-BatchNormalization
-ReLU
-Dropout(0.4)
+Stage 1: 2 × ResBlock(64,  stride=1)                → 56×56×64
+Stage 2: 2 × ResBlock(128, first stride=2)          → 28×28×128
+Stage 3: 4 × ResBlock(256, first stride=2)          → 14×14×256
+Stage 4: 2 × ResBlock(512, first stride=2)          →  7×7×512
     │
     ▼
-Dense(512, no_bias, L2_reg=5e-4)
-BatchNormalization
-L2-Normalise  ────────────────────── Embedding (512,) for inference
+GlobalAveragePooling2D → BN                         → 512
+Dense(1024, no bias)   → BN → PReLU → Dropout(0.3) → 1024
+Dense(512,  no bias)   → BN → UnitNorm (float32)   → 512-d Embedding
     │
-    ▼  [training only]
-ArcFaceLayer
-    • W: (512, num_classes) — one prototype per identity
-    • cos(θ) = emb · W_norm
-    • margin: cos(θ+m) for true class, cos(θ) for others
-    • scale by 64.0
-    │
-    ▼
-Logits (num_classes,)
-SparseCategoricalCrossentropy loss
+    ├── Inference: cosine similarity matching
+    └── Training:  ArcFaceLayer → Logits(num_classes)
+```
+
+#### בלוק Residual
+
+```python
+x → Conv(3×3) → BN → PReLU → Conv(3×3) → BN → Add(shortcut) → PReLU
+```
+
+כל שינוי ב-stride או ב-channels מטופל על ידי projection shortcut (1×1 Conv + BN).
+
+---
+
+### ArcFace Loss
+
+ArcFace מוסיף **מרווח זוויתי (m=0.5)** בין זהויות שונות במרחב ה-Embedding:
+
+```
+logits[i] = s · cos(θᵢ + m)    עבור המחלקה הנכונה
+logits[i] = s · cos(θᵢ)         עבור שאר המחלקות
+```
+
+המימוש מחשב את `cos(θ+m)` ישירות דרך זהות טריגונומטרית (ללא arccos יקר):
+
+```
+cos(θ + m) = cos θ · cos m − sin θ · sin m
+```
+
+| פרמטר | ערך | הסיבה |
+|-------|-----|--------|
+| Margin m | 0.5 (≈28.6°) | ערך ברירת מחדל מהמאמר |
+| Scale s | 32 | הורד מ-64 — עם ~8K תמונות, s=64 גורם לאימון להיות over-confident |
+| L2 Regularizer | 1e-4 | מניעת overfitting על dataset קטן |
+| Dropout | 0.3 | פחות אגרסיבי מ-fine-tuning |
+
+---
+
+### לוח זמנים האימון
+
+| שלב | אפוקים | LR | מה קורה |
+|-----|--------|----|---------| 
+| Warm-up | 0–9 | 0 → 1e-3 (linear) | יציבות עם weights אקראיים |
+| Cosine Decay | 10–120 | 1e-3 → 1e-6 | כיוון עדין |
+
+**אסטרטגיית אימון:** כל השכבות trainable מאפוק 0 — אין Phase frozen.  
+**Mixed Precision:** float16 אוטומטי על T4/A100 (~2× speedup). שכבת UnitNorm מקובעת ל-float32 למניעת NaN.
+
+---
+
+### Augmentation Pipeline
+
+| טרנספורמציה | הגדרה |
+|-------------|-------|
+| Horizontal Flip | 50% |
+| Random Rotation | ±18° |
+| Random Zoom | ±12% |
+| Brightness | ±0.25 |
+| Contrast | ±0.25 |
+| Saturation | ±0.15 |
+| Hue | ±0.05 |
+| Occlusion Erasing | 25% — מדמה חסימות חלקיות (משקפיים, יד, מסכה) |
+
+---
+
+### Callbacks
+
+| Callback | Monitor | פעולה |
+|----------|---------|-------|
+| `VerificationCallback` | — | מחשב AUC/EER מ-val identities כל epoch |
+| `ModelCheckpoint` (best) | `val_ver_auc ↑` | שומר `best_train_model.keras` |
+| `EarlyStopping` | `val_ver_auc ↑` | עוצר אחרי 20 epochs ללא שיפור |
+| `ReduceLROnPlateau` | `val_loss ↓` | מחצה LR אחרי 7 epochs |
+| `TensorBoard` | — | logs ל-`logs/training/` |
+| `CSVLogger` | — | `logs/training_log.csv` |
+
+---
+
+## ה-API / Backend
+
+הבאקאנד בנוי ב-**Python** ומשמש כגשר בין צינור ה-AI לבין ה-Frontend.
+
+### תפקידים עיקריים
+
+- **קבלת פריימים מהמצלמה** ושליחתם לצינור הזיהוי
+- **ניהול גלריית הפנים** — שמירת, עדכון ומחיקת embeddings
+- **שמירת היסטוריית אירועים** — כל זיהוי (מורשה / לא מוכר) עם timestamp
+- **שליחת התראות Push** לאפליקציית המשתמש בזמן אמת
+- **חשיפת REST API** לממשק המשתמש
+
+### מודולים מרכזיים
+
+| קובץ | תפקיד |
+|------|-------|
+| `detector.py` | YOLOv8-face wrapper — זיהוי + 5-point keypoints |
+| `aligner.py` | יישור עין-לעין (affine warp) לפני CNN |
+| `inference.py` | `compare_two_images()`, `FaceIdentifier`, `run_webcam_colab()` |
+| `evaluate.py` | ROC / AUC / EER / TAR@FAR |
+| `utils.py` | mixed precision, gallery builder, training curves |
+| `config.py` | כל ה-hyperparameters והנתיבים — עריכה ממקום אחד |
+
+### מצבי Inference
+
+```bash
+# השוואת שתי תמונות (1:1 verification)
+python inference.py --mode compare --img1 alice.jpg --img2 bob.jpg
+
+# זיהוי בתמונה קבוצתית מול גלריה (1:N identification)
+python inference.py --mode identify --img group.jpg --gallery data/gallery/
+
+# מצלמה חיה (Google Colab)
+python inference.py --mode webcam --gallery data/gallery/
+```
+
+### פורמט תגובת Verification
+
+```json
+{
+  "similarity": 0.7283,
+  "confidence": 0.89,
+  "match": true,
+  "verdict": "Same Person ✓"
+}
+```
+
+### Confidence Calibration
+
+דמיון קוסינוס גולמי ממופה לאחוז ביטחון קריא דרך sigmoid:
+
+```python
+confidence = sigmoid(12 · (cosine_sim − 0.55))
+```
+
+ציון בדיוק על הסף (0.55) יוצג כ-50%, לא 75%.
+
+### Gallery — מבנה התיקיות
+
+```
+data/gallery/
+    Alice_Smith/
+        photo1.jpg
+        photo2.jpg     ← ממוצע embeddings לוקטור אחד יציב
+    Bob_Jones/
+        photo1.jpg
 ```
 
 ---
 
-## 🔧 Common Issues & Fixes
+## ממשק המשתמש Frontend
 
-**"No face detected"**
-- Try lowering `FACE_CONF_THRESHOLD` in `config.py` (e.g., `0.35`)
-- Make sure the image contains a clearly visible, frontal face
-- Minimum detected face size is `20×20` pixels; use a higher-resolution image
+הממשק בנוי ב-**React** ומהווה את מרכז השליטה של המערכת.
 
-**Out-of-memory (OOM) on GPU**
-- Reduce `BATCH_SIZE` to `16` or `8`
-- Disable mixed precision: `MIXED_PRECISION = False` in `config.py`
+### מסכים
 
-**Training loss is NaN**
-- Gradient explosion — try reducing `WARMUP_LR` to `5e-4`
-- Lower `ARCFACE_SCALE` from 64 to 32
+| מסך | תיאור |
+|-----|-------|
+| **Login / Register** | כניסה והרשמה עם שם משתמש וסיסמה |
+| **Dashboard** | מצב שרת, מצב ניטור, הודעות סטטוס — נקודת מוצא לכל המסכים |
+| **Monitoring** | שידור חי מהמצלמה + זיהוי פנים בזמן אמת. מתג הפעלה/כיבוי עם חיווי צבעוני. פועל ברקע בזמן מעבר בין מסכים |
+| **Gallery** | ניהול אנשים מורשים — העלאת תמונות, שיוך שמות, מחיקה, עדכון |
+| **Security Alerts** | היסטוריית כל האירועים החריגים עם timestamp וסטטוס טיפול |
+| **Cameras** | בחירת מצלמה פעילה + תצוגה מקדימה לפני הפעלה |
+| **Face Comparison** | בדיקה ידנית של התאמה בין שתי תמונות — לצורכי בדיקה ופיתוח |
+| **Legacy Alerts** | תאימות לאחור עם התראות ישנות |
 
-**Low accuracy (< 70%)**
-- Dataset too small: need at least 1,000 identities for good results
-- Try increasing `MIN_IMAGES_PER_CLASS` to 10 for cleaner data
-- Increase `FINETUNE_EPOCHS` to 50
+### תכונות עיקריות
 
-**Model file not found at inference**
-- Must run `python train.py` first
-- Default path: `checkpoints/best_embedding_model.keras`
-
-**YOLOv8 download fails**
-- Manually download from [HuggingFace](https://huggingface.co/arnabdhar/YOLOv8-Face-Detection)
-- Place `model.pt` at `checkpoints/yolov8n_face.pt`
+- **Push Notifications** — התראה מיידית כשמזוהה אדם לא מוכר
+- **Real-time Status** — חיווי חי של מצב המערכת (ניטור פעיל / כבוי)
+- **Gallery Management** — ממשק לניהול מלא של אנשים מורשים
+- **Event Log** — כל אירוע מתועד עם זמן, תמונה וסטטוס
 
 ---
 
-## 📚 References
+## Dataset
 
-- **ArcFace**: Deng et al. (2019) — <https://arxiv.org/abs/1801.07698>
-- **ResNet50V2**: He et al. (2016) — <https://arxiv.org/abs/1603.05027>
-- **YOLOv8**: Ultralytics — <https://docs.ultralytics.com>
-- **LFW Dataset**: <http://vis-www.cs.umass.edu/lfw/>
-- **VGGFace2**: <https://github.com/ox-vgg/vgg_face2>
+הפרויקט מאומן על **LFW (Labeled Faces in the Wild)** — דאטאסט פנים מהעולם האמיתי, בלתי-מבוקר.
+
+### הכנת הנתונים
+
+| שלב | פעולה |
+|-----|-------|
+| הורדה | `python download_lfw.py --min-images 5` — דרך TensorFlow Datasets |
+| סינון | נשמרות רק זהויות עם ≥5 תמונות (~1,680 זהויות) |
+| יישור | `prepare_aligned_dataset()` — YOLOv8 + eye-warp לכל תמונה |
+| חלוקה | **Identity-level split** — 80% train / 10% val / 10% test, ללא data leakage |
+
+> **למה identity-level split?**  
+> חלוקה אקראית של תמונות תאפשר לאותה פנים להופיע גם ב-train וגם ב-test — מה שייצור מדדים מנופחים שלא מייצגים יכולת הכללה אמיתית.
+
+### זוגות אימות (Verification Pairs)
+
+`build_verification_pairs()` יוצרת זוגות מאוזנים מ-val/test בלבד:
+- 50% זוגות חיוביים (אותו אדם)
+- 50% זוגות שליליים (אנשים שונים)
+
+זה מאפשר מדידת ROC/EER אמיתית, ולא סיווג רגיל.
 
 ---
 
-## 📜 Licence
+## מדדי ביצועים
 
-MIT — free for personal and commercial use.
+### תוצאות ROC על LFW
+
+| מדד | ערך |
+|-----|-----|
+| **AUC** | 0.90 |
+| **EER** | 18.96% |
+| **TAR @ FAR=0.1%** | 22.4% |
+| **TAR @ FAR=1.0%** | 22.4% |
+| **TAR @ FAR=10.0%** | 72.1% |
+
+### בדיקה עצמאית
+
+| השוואה | Similarity Score | תוצאה |
+|--------|-----------------|-------|
+| אותה תמונה | 1.000 | 100% match |
+| אדם מול אישה שונה | 0.728 | המודל הבחין בשוני |
+| שני גברים שונים | 0.334 | זיהוי חד-משמעי כשונים |
+| שני אחים (דמיון גנטי) | 0.764 | הבחין בשוני, אך ציון גבוה יחסית — צפוי |
+
+---
+
+## התקנה והרצה
+
+### דרישות מוקדמות
+
+- Python 3.10+
+- Node.js 18+ (לפרונטאנד)
+- GPU עם CUDA (מומלץ — T4/A100 לאימון)
+
+### Backend
+
+```bash
+# שכפול הריפו
+git clone https://github.com/YOUR_USERNAME/VisiGuard
+cd VisiGuard
+
+# התקנת תלויות Python
+pip install tensorflow ultralytics huggingface_hub scikit-learn \
+            opencv-python tensorflow-datasets
+
+# הורדת הנתונים
+python download_lfw.py --min-images 5
+
+# יישור פנים
+python -c "from dataset import prepare_aligned_dataset; prepare_aligned_dataset()"
+
+# אימון המודל (Google Colab מומלץ — ראה training_demo.ipynb)
+python train.py
+
+# הערכה
+python evaluate.py
+
+# הרצת זיהוי
+python inference.py --mode compare --img1 face1.jpg --img2 face2.jpg
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm install
+npm start
+# האפליקציה תרוץ על http://localhost:3000
+```
+
+### Google Colab — אימון מלא
+
+```
+Runtime → Change runtime type → GPU (T4 or A100)
+```
+
+פתח את `training_demo.ipynb` ורוץ תא-תא. הנוטבוק מכסה:
+1. בדיקת GPU
+2. התקנת תלויות (כולל `tensorflow-datasets`)
+3. הורדת LFW
+4. יישור פנים
+5. אימון (~20–40 דקות על T4)
+6. הצגת עקומות אימון
+7. הערכה (ROC + similarity distributions)
+8. Inference
+
+---
+
+## מבנה הפרויקט
+
+```
+VisiGuard/
+│
+├── 📂 AI Model
+│   ├── model.py           # FaceResNet architecture
+│   ├── arcface.py         # ArcFace loss layer
+│   ├── train.py           # Training pipeline (ArcFaceTrainer + callbacks)
+│   ├── dataset.py         # Data loading, augmentation, verification pairs
+│   ├── evaluate.py        # ROC / AUC / EER metrics + plots
+│   ├── inference.py       # compare, identify, webcam modes
+│   ├── detector.py        # YOLOv8-face wrapper
+│   ├── aligner.py         # Eye-landmark affine alignment
+│   ├── download_lfw.py    # LFW via TensorFlow Datasets
+│   ├── config.py          # ← כל ה-hyperparameters כאן
+│   └── utils.py           # Mixed precision, plotting, gallery builder
+│
+├── 📒 training_demo.ipynb # Colab walkthrough — end to end
+│
+├── 📂 data/
+│   ├── faces/             # Raw LFW images (after download_lfw.py)
+│   ├── faces_aligned/     # Aligned crops (after prepare_aligned_dataset)
+│   └── gallery/           # Authorized identities for runtime matching
+│
+├── 📂 checkpoints/
+│   ├── best_embedding_model.keras  # Inference-only (512-d output)
+│   ├── best_train_model.keras      # Full model incl. ArcFace head
+│   └── yolov8n_face.pt             # YOLOv8-face weights (auto-downloaded)
+│
+├── 📂 outputs/
+│   ├── training_history.png
+│   ├── roc_curve.png
+│   ├── similarity_dist.png
+│   └── eval_metrics.json
+│
+├── 📂 logs/
+│   ├── training/          # TensorBoard logs
+│   └── training_log.csv
+│
+├── 📂 frontend/           # React application
+│   ├── src/
+│   │   ├── screens/       # Login, Dashboard, Monitoring, Gallery,
+│   │   │                  # Alerts, Cameras, FaceComparison
+│   │   └── components/
+│   └── package.json
+│
+└── README.md
+```
+
+---
+
+## אימון מחדש של המודל
+
+### הגדרות מרכזיות ב-`config.py`
+
+```python
+# נתיבים
+DATA_DIR   = '/content/FaceRecognition/data'
+
+# ארכיטקטורה
+EMBEDDING_DIM   = 512
+DROPOUT_RATE    = 0.3
+L2_REGULARIZER  = 1e-4
+
+# ArcFace
+ARCFACE_MARGIN  = 0.5
+ARCFACE_SCALE   = 32.0
+
+# אימון
+BATCH_SIZE      = 64
+TOTAL_EPOCHS    = 120
+WARMUP_EPOCHS   = 10
+INITIAL_LR      = 1e-3
+MIN_LR          = 1e-6
+
+# Inference
+SAME_PERSON_THRESHOLD = 0.55
+```
+
+### המשך אימון מ-checkpoint
+
+```bash
+python train.py --resume
+```
+
+### שינוי גודל batch לפי GPU
+
+```bash
+python train.py --batch-size 32
+```
+
+---
+
+## טכנולוגיות
+
+| קטגוריה | טכנולוגיה |
+|---------|-----------|
+| שפת תכנות | Python 3.10 |
+| Deep Learning | TensorFlow / Keras |
+| זיהוי אנשים | YOLOv8 (Ultralytics) |
+| זיהוי פנים | FaceResNet + ArcFace (מאפס) |
+| Computer Vision | OpenCV |
+| Dataset | LFW via TensorFlow Datasets |
+| Frontend | React |
+| מטריקות | scikit-learn (ROC, AUC, EER) |
+| ניהול קוד | Git / GitHub (branch-based workflow) |
+
+---
+
+## רפרנסים
+
+- Deng et al. — [ArcFace: Additive Angular Margin Loss for Deep Face Recognition](https://arxiv.org/abs/1801.07698), CVPR 2019
+- [YOLOv8-face — arnabdhar/YOLOv8-Face-Detection](https://huggingface.co/arnabdhar/YOLOv8-Face-Detection)
+- [LFW Dataset — Labeled Faces in the Wild](http://vis-www.cs.umass.edu/lfw/)
+- [TensorFlow Datasets — LFW](https://www.tensorflow.org/datasets/catalog/lfw)
+
+---
+
+<div align="center">
+
+פותח על ידי **נועם כהן** | VisiGuard — שכבת הגנה אקטיבית לבית החכם
+
+</div>
